@@ -172,6 +172,7 @@
   }
   .swatch:hover { border-color: rgba(255,255,255,0.4); }
   .swatch.active { border-color: #fff; box-shadow: 0 0 0 2px var(--sw); }
+  h2 .updated { display: inline-block; margin-left: 10px; font-size: 10px; letter-spacing: 0.05em; text-transform: none; color: var(--faint); }
 </style>
 </head>
 <body>
@@ -213,19 +214,19 @@
   </nav>
 
   <section class="tab-panel active" data-panel="matchups">
-    <h2>Matchups</h2>
+    <h2>Matchups <span class="updated" id="gamesUpdated"></span></h2>
     <div id="games" class="loading">Loading…</div>
   </section>
 
   <section class="tab-panel" data-panel="live">
-    <h2>Live K Watch <span style="letter-spacing:0;text-transform:none">(auto-refreshes every 60s while games are in progress)</span></h2>
+    <h2>Live K Watch <span class="updated" id="liveUpdated"></span> <span style="letter-spacing:0;text-transform:none">(auto-refreshes every 60s while games are in progress)</span></h2>
     <div id="live" class="loading">Loading…</div>
   </section>
 
   <section class="tab-panel" data-panel="teams">
     <div class="cols">
       <section>
-        <h2>Top 10 Team Strikeouts <span style="letter-spacing:0;text-transform:none">(target overs)</span></h2>
+        <h2>Top 10 Team Strikeouts <span class="updated" id="topTeamsUpdated"></span> <span style="letter-spacing:0;text-transform:none">(target overs)</span></h2>
         <table id="topTeams"></table>
       </section>
       <section>
@@ -236,26 +237,26 @@
   </section>
 
   <section class="tab-panel" data-panel="pitchers">
-    <h2>Top 50 Pitcher Strikeouts</h2>
+    <h2>Top 50 Pitcher Strikeouts <span class="updated" id="pitchersUpdated"></span></h2>
     <table id="pitchers"></table>
   </section>
 
   <section class="tab-panel" data-panel="workload">
-    <h2>Innings/Pitches <span style="letter-spacing:0;text-transform:none">(own season avg per start vs. how long opposing starters typically last against this lineup)</span></h2>
+    <h2>Innings/Pitches <span class="updated" id="workloadUpdated"></span> <span style="letter-spacing:0;text-transform:none">(own season avg per start vs. how long opposing starters typically last against this lineup)</span></h2>
     <div id="workload" class="loading">Loading (checks every opposing starter's boxscore this season — first load can take a minute)…</div>
   </section>
 
   <section class="tab-panel" data-panel="bvp">
-    <h2>Batter vs Pitcher Edges <span style="letter-spacing:0;text-transform:none">(10+ AB, .500+ AVG or 50%+ K)</span></h2>
+    <h2>Batter vs Pitcher Edges <span class="updated" id="bvpUpdated"></span> <span style="letter-spacing:0;text-transform:none">(10+ AB, .500+ AVG or 50%+ K)</span></h2>
     <div id="bvp" class="loading">Loading (this one checks every hitter on every roster — can take a minute)…</div>
   </section>
 
   <section class="tab-panel" data-panel="props">
-    <h2>Strikeout Prop Board <span style="letter-spacing:0;text-transform:none">(Kalshi lines · season hit rate per line)</span></h2>
+    <h2>Strikeout Prop Board <span class="updated" id="propsUpdated"></span> <span style="letter-spacing:0;text-transform:none">(Kalshi lines · season hit rate per line)</span></h2>
     <div id="props" class="loading">Loading prop board…</div>
   </section>
 
-  <div class="note">Data from MLB Stats API · cached 30 min server-side</div>
+  <div class="note">Data from MLB Stats API · each board refreshes on its own schedule server-side (see "updated" tags above)</div>
 </main>
 
 <script>
@@ -271,6 +272,60 @@ function fmtTime(iso) {
   catch { return "TBD"; }
 }
 
+// ---- freshness tags ----
+// Each board reports updatedAt (epoch ms) for its own data; the tag text ("3m ago")
+// is re-derived on a timer so it stays honest without re-fetching.
+const lastUpdated = {}; // badgeId -> epoch ms (or null)
+
+function fmtAgo(ms) {
+  if (!ms) return "";
+  const secs = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (secs < 60) return "updated just now";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `updated ${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  return `updated ${hrs}h ago`;
+}
+
+function setUpdated(badgeId, updatedAt) {
+  lastUpdated[badgeId] = updatedAt || null;
+  const el = $(badgeId);
+  if (el) el.textContent = fmtAgo(updatedAt);
+}
+
+setInterval(() => {
+  Object.keys(lastUpdated).forEach((id) => setUpdated(id, lastUpdated[id]));
+}, 30000);
+
+// ---- generic tab loader ----
+// The server serves today's boards from a background-refreshed store — a response
+// with data === null just means the very first refresh hasn't finished yet (e.g.
+// right after a deploy). Poll briefly until it lands instead of treating it as an error.
+function loadTab(elId, badgeId, url, renderFn, notReadyMsg, opts = {}) {
+  const el = $(elId);
+  const attempt = (opts.attempt || 0) + 1;
+  fetch(url)
+    .then((res) => { if (!res.ok) throw new Error("HTTP " + res.status); return res.json(); })
+    .then((json) => {
+      if (json.data == null) {
+        if (attempt > 24) {
+          el.className = "loading";
+          el.textContent = notReadyMsg + " Still not available after a while — try Refresh.";
+          return;
+        }
+        el.className = "loading";
+        el.textContent = notReadyMsg;
+        setTimeout(() => loadTab(elId, badgeId, url, renderFn, notReadyMsg, { attempt }), 5000);
+        return;
+      }
+      renderFn(json.data, json.updatedAt);
+      if (badgeId) setUpdated(badgeId, json.updatedAt);
+    })
+    .catch((e) => {
+      el.innerHTML = '<div class="err">Failed to load (' + e.message + "). Refresh to retry.</div>";
+    });
+}
+
 async function load(date) {
   $("error").innerHTML = "";
   $("games").className = "loading"; $("games").textContent = "Loading…";
@@ -279,50 +334,26 @@ async function load(date) {
   $("props").className = "loading"; $("props").textContent = "Loading prop board…";
   $("workload").className = "loading"; $("workload").textContent = "Loading (checks every opposing starter's boxscore this season — first load can take a minute)…";
 
-  let dash;
-  try {
-    const res = await fetch("/api/dashboard?date=" + date);
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    dash = await res.json();
-  } catch (e) {
-    $("error").innerHTML = '<div class="err">Couldn\'t load data (' + e.message + "). Hit refresh.</div>";
-    $("games").textContent = ""; $("live").textContent = ""; $("bvp").textContent = ""; $("props").textContent = ""; $("workload").textContent = "";
-    return;
-  }
+  loadTab("games", "gamesUpdated", "/api/dashboard?date=" + date, (dash, updatedAt) => {
+    renderDash(dash);
+    setUpdated("topTeamsUpdated", updatedAt);
+    setUpdated("pitchersUpdated", updatedAt);
+  }, "Server is preparing today's matchups — retrying…");
 
-  renderDash(dash);
   loadLive(date);
 
-  // BvP, prop board, and workload load separately (and concurrently) since they're slower.
-  fetch("/api/bvp?date=" + date)
-    .then((res) => { if (!res.ok) throw new Error("HTTP " + res.status); return res.json(); })
-    .then(renderBvP)
-    .catch((e) => {
-      $("bvp").innerHTML = '<div class="err">BvP edges failed to load (' + e.message + "). The main board above is unaffected — refresh to retry.</div>";
-    });
+  loadTab("bvp", "bvpUpdated", "/api/bvp?date=" + date, renderBvP,
+    "Server is computing BvP edges in the background (checks every hitter on every roster — can take a minute after each daily refresh)…");
 
-  fetch("/api/props?date=" + date)
-    .then((res) => { if (!res.ok) throw new Error("HTTP " + res.status); return res.json(); })
-    .then(renderProps)
-    .catch((e) => {
-      $("props").innerHTML = '<div class="err">Prop board failed to load (' + e.message + "). Refresh to retry.</div>";
-    });
+  loadTab("props", "propsUpdated", "/api/props?date=" + date, renderProps,
+    "Server is preparing the prop board — retrying…");
 
-  fetch("/api/workload?date=" + date)
-    .then((res) => { if (!res.ok) throw new Error("HTTP " + res.status); return res.json(); })
-    .then(renderWorkload)
-    .catch((e) => {
-      $("workload").innerHTML = '<div class="err">Innings/Pitches failed to load (' + e.message + "). Refresh to retry.</div>";
-    });
+  loadTab("workload", "workloadUpdated", "/api/workload?date=" + date, renderWorkload,
+    "Server is computing Innings/Pitches in the background — retrying…");
 }
 
 function loadLive(date) {
-  fetch("/api/live?date=" + date)
-    .then((res) => { if (!res.ok) throw new Error("HTTP " + res.status); return res.json(); })
-    .then(renderLive)
-    .catch((e) => {
-      $("live").innerHTML = '<div class="err">Live K Watch failed to load (' + e.message + "). Refresh to retry.</div>";
-    });
+  loadTab("live", "liveUpdated", "/api/live?date=" + date, renderLive, "Server is preparing the live board — retrying…");
 }
 
 function renderDash(dash) {

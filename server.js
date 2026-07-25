@@ -9,11 +9,19 @@
  *   GET /api/workload?date=YYYY-MM-DD   → each starter's own avg IP/pitches per start vs. how long
  *                                          opposing starters typically last against that lineup
  *
+ * All five responses share the shape { updatedAt, data }, where updatedAt is
+ * the epoch-ms timestamp of the underlying computation (not the request).
+ *
+ * For today's date, every route is a pure read from an in-memory `store` that
+ * background jobs keep fresh on their own schedule (see "background refresh"
+ * below) — no live upstream fetch happens on the request path, so page loads
+ * are instant and immune to Render's request-time limits. For any other date
+ * (a visitor browsing a past or future day via the date picker), data is
+ * fetched on demand and cached per-date for TTL_MS, same as before.
+ *
  * MLB data is fetched server-side from statsapi.mlb.com (free, no key);
  * prop lines come from Kalshi's public market data API (also free, no key).
- * No CORS issues since everything happens server-side. Results are cached
- * in memory per date so repeat visits are instant and the upstream APIs
- * aren't hammered.
+ * No CORS issues since everything happens server-side.
  */
 
 const express = require("express");
@@ -30,18 +38,24 @@ const PROP_LINES = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
 const LIVE_STATUSES = new Set(["Scheduled", "Pre-Game"]); // statuses that DON'T need a live-feed fetch yet
 
-// ---------- tiny per-date cache ----------
-const cache = new Map(); // key -> { at: ms, data }
+// ---------- per-date cache (only used for on-demand, non-today lookups) ----------
+const cache = new Map(); // key -> { updatedAt, data }
 const TTL_MS = 30 * 60 * 1000; // 30 minutes
-const LIVE_TTL_MS = 20 * 1000; // live board refreshes much faster
 
 function cacheGet(key, ttl = TTL_MS) {
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < ttl) return hit.data;
+  if (hit && Date.now() - hit.updatedAt < ttl) return hit;
   return null;
 }
-function cacheSet(key, data) {
-  cache.set(key, { at: Date.now(), data });
+function cacheSet(key, envelope) {
+  cache.set(key, envelope);
+}
+async function getOrCompute(key, ttl, fn) {
+  const cached = cacheGet(key, ttl);
+  if (cached) return cached;
+  const envelope = { updatedAt: Date.now(), data: await fn() };
+  cacheSet(key, envelope);
+  return envelope;
 }
 
 /** "6.1" (6 IP, 1 out) -> 19 outs. */
@@ -82,11 +96,15 @@ function todayISO() {
   return new Date().toISOString().slice(0, 10);
 }
 
-// ---------- core data assembly ----------
-async function getDashboard(date) {
-  const cached = cacheGet("dash:" + date);
-  if (cached) return cached;
+/** Current hour (0-23) in US Eastern time, for scheduling the daily job around baseball's morning. */
+function currentHourET() {
+  return Number(
+    new Intl.DateTimeFormat("en-US", { hour: "numeric", hour12: false, timeZone: "America/New_York" }).format(new Date())
+  );
+}
 
+// ---------- core data assembly (pure computation, no caching in here) ----------
+async function computeDashboard(date) {
   const season = date.slice(0, 4);
   const [sched, teamStats, leaders] = await Promise.all([
     getJSON(`${MLB}/schedule?sportId=1&date=${date}&hydrate=probablePitcher,team`),
@@ -134,20 +152,15 @@ async function getDashboard(date) {
     strikeOuts: Number(l.value || 0),
   }));
 
-  const data = { date, games, topTeams, bottomTeams, pitchers };
-  cacheSet("dash:" + date, data);
-  return data;
+  return { date, games, topTeams, bottomTeams, pitchers };
 }
 
-async function getBvPEdges(date) {
-  const cached = cacheGet("bvp:" + date);
-  if (cached) return cached;
+async function computeBvPEdges(date, dash) {
+  if (!dash) dash = await computeDashboard(date);
 
   const MIN_AB = 10;
   const AVG_THRESHOLD = 0.5;
   const K_RATE_THRESHOLD = 0.5;
-
-  const dash = await getDashboard(date);
 
   // pitcher ↔ opposing-team pairs
   const pairs = [];
@@ -220,9 +233,7 @@ async function getBvPEdges(date) {
   });
 
   edges.sort((a, b) => b.avg - a.avg || b.kRate - a.kRate);
-  const out = { date, edges, checked: requests.length };
-  cacheSet("bvp:" + date, out);
-  return out;
+  return { date, edges, checked: requests.length };
 }
 
 function kalshiDatePrefix(date) {
@@ -259,11 +270,9 @@ function findGameContext(dash, pitcherId) {
   return null;
 }
 
-async function getPropBoard(date) {
-  const cached = cacheGet("props:" + date);
-  if (cached) return cached;
-
-  const [dash, markets] = await Promise.all([getDashboard(date), getKalshiMarketsForDate(date)]);
+async function computePropBoard(date, dash) {
+  if (!dash) dash = await computeDashboard(date);
+  const markets = await getKalshiMarketsForDate(date);
 
   // group Kalshi markets by pitcher name -> { line: marketPct }
   const byPitcher = new Map();
@@ -337,9 +346,7 @@ async function getPropBoard(date) {
     return a.name.localeCompare(b.name);
   });
 
-  const out = { date, season, pitchers };
-  cacheSet("props:" + date, out);
-  return out;
+  return { date, season, pitchers };
 }
 
 /** A pitcher's own average IP / pitches / K per start this season. */
@@ -421,12 +428,9 @@ function summarizeWorkload(entry) {
   };
 }
 
-async function getWorkloadBoard(date) {
-  const cached = cacheGet("workload:" + date);
-  if (cached) return cached;
-
+async function computeWorkloadBoard(date, dash) {
+  if (!dash) dash = await computeDashboard(date);
   const season = date.slice(0, 4);
-  const dash = await getDashboard(date);
 
   const legs = [];
   for (const g of dash.games) {
@@ -463,18 +467,15 @@ async function getWorkloadBoard(date) {
     return a.name.localeCompare(b.name);
   });
 
-  const out = { date, season, pitchers };
-  cacheSet("workload:" + date, out);
-  return out;
+  return { date, season, pitchers };
 }
 
 // ---------- live K watch ----------
-async function getLiveBoard(date) {
-  const cached = cacheGet("live:" + date, LIVE_TTL_MS);
-  if (cached) return cached;
+async function computeLiveBoard(date, dash, propBoard) {
+  if (!dash) dash = await computeDashboard(date);
+  if (!propBoard) propBoard = await computePropBoard(date, dash);
 
   const season = date.slice(0, 4);
-  const [dash, propBoard] = await Promise.all([getDashboard(date), getPropBoard(date)]);
   const propByPitcherId = new Map(propBoard.pitchers.filter((p) => p.mlbId).map((p) => [p.mlbId, p]));
 
   /** Pick the prop line to track pace against: closest to a coin-flip market price, else closest to a 50% hit rate. */
@@ -558,47 +559,169 @@ async function getLiveBoard(date) {
     };
   }));
 
-  const out = { date, games };
-  cacheSet("live:" + date, out);
-  return out;
+  return { date, games };
 }
+
+// ---------- on-demand path (any date other than today) ----------
+// Mirrors the old per-date cache behavior: computed lazily, cached for TTL_MS,
+// with dashboard reused across the other three boards to avoid duplicate fetches.
+function onDemandDashboard(date) {
+  return getOrCompute("dash:" + date, TTL_MS, () => computeDashboard(date));
+}
+function onDemandBvP(date) {
+  return getOrCompute("bvp:" + date, TTL_MS, async () => computeBvPEdges(date, (await onDemandDashboard(date)).data));
+}
+function onDemandProps(date) {
+  return getOrCompute("props:" + date, TTL_MS, async () => computePropBoard(date, (await onDemandDashboard(date)).data));
+}
+function onDemandWorkload(date) {
+  return getOrCompute("workload:" + date, TTL_MS, async () => computeWorkloadBoard(date, (await onDemandDashboard(date)).data));
+}
+function onDemandLive(date) {
+  return getOrCompute("live:" + date, TTL_MS, async () => {
+    const dash = (await onDemandDashboard(date)).data;
+    const props = (await onDemandProps(date)).data;
+    return computeLiveBoard(date, dash, props);
+  });
+}
+
+// ---------- background refresh: in-memory store, kept warm on a schedule ----------
+const store = {
+  dashboard: { updatedAt: null, data: null },
+  props: { updatedAt: null, data: null },
+  liveK: { updatedAt: null, data: null },
+  bvp: { updatedAt: null, data: null },
+  workload: { updatedAt: null, data: null },
+};
+
+const HOUR_MS = 60 * 60 * 1000;
+const LIVE_CHECK_MS = 3 * 60 * 1000; // 2-5 min band
+const DAILY_CHECK_MS = 5 * 60 * 1000;
+
+/** Matchups + team/pitcher K leaders (cheap: 3 calls) and a live-board baseline, refreshed hourly. */
+async function refreshDashboardAndProps() {
+  const date = todayISO();
+  try {
+    const dash = await computeDashboard(date);
+    store.dashboard = { updatedAt: Date.now(), data: dash };
+  } catch (e) {
+    console.error("[refresh] dashboard failed:", e.message);
+    return; // props/live baseline need a dashboard to build on
+  }
+  try {
+    const props = await computePropBoard(date, store.dashboard.data);
+    store.props = { updatedAt: Date.now(), data: props };
+  } catch (e) {
+    console.error("[refresh] props failed:", e.message);
+  }
+  try {
+    const live = await computeLiveBoard(date, store.dashboard.data, store.props.data);
+    store.liveK = { updatedAt: Date.now(), data: live };
+  } catch (e) {
+    console.error("[refresh] live baseline failed:", e.message);
+  }
+}
+
+/** Only touches the live board (with real in-game feeds) when a game is actually in progress. */
+async function refreshLiveIfInProgress() {
+  const date = todayISO();
+  let sched;
+  try {
+    sched = await getJSON(`${MLB}/schedule?sportId=1&date=${date}`);
+  } catch (e) {
+    console.error("[refresh] live-check schedule fetch failed:", e.message);
+    return;
+  }
+  const games = sched?.dates?.[0]?.games || [];
+  const anyLive = games.some((g) => g.status?.abstractGameState === "Live");
+  if (!anyLive) return;
+  try {
+    const live = await computeLiveBoard(date, store.dashboard.data, store.props.data);
+    store.liveK = { updatedAt: Date.now(), data: live };
+  } catch (e) {
+    console.error("[refresh] live refresh failed:", e.message);
+  }
+}
+
+/** BvP edges + innings/pitches workload — the expensive, hundreds-of-calls boards. Once a day. */
+async function refreshDaily() {
+  const date = todayISO();
+  const dash = store.dashboard.data; // compute*() will fetch its own if this is still null
+  try {
+    const bvp = await computeBvPEdges(date, dash);
+    store.bvp = { updatedAt: Date.now(), data: bvp };
+  } catch (e) {
+    console.error("[refresh] bvp failed:", e.message);
+  }
+  try {
+    const workload = await computeWorkloadBoard(date, dash);
+    store.workload = { updatedAt: Date.now(), data: workload };
+  } catch (e) {
+    console.error("[refresh] workload failed:", e.message);
+  }
+}
+
+let lastDailyRunDate = null;
+
+async function startupRefresh() {
+  await refreshDashboardAndProps();
+  await refreshLiveIfInProgress();
+  await refreshDaily();
+  lastDailyRunDate = todayISO();
+}
+startupRefresh().catch((e) => console.error("[refresh] startup refresh failed:", e.message));
+
+setInterval(() => refreshDashboardAndProps().catch((e) => console.error("[refresh] hourly tick failed:", e.message)), HOUR_MS);
+setInterval(() => refreshLiveIfInProgress().catch((e) => console.error("[refresh] live tick failed:", e.message)), LIVE_CHECK_MS);
+setInterval(() => {
+  const date = todayISO();
+  if (currentHourET() === 6 && lastDailyRunDate !== date) {
+    lastDailyRunDate = date;
+    refreshDaily().catch((e) => console.error("[refresh] daily tick failed:", e.message));
+  }
+}, DAILY_CHECK_MS);
 
 // ---------- routes ----------
 app.get("/api/dashboard", async (req, res) => {
+  const date = req.query.date || todayISO();
   try {
-    res.json(await getDashboard(req.query.date || todayISO()));
+    res.json(date === todayISO() ? store.dashboard : await onDemandDashboard(date));
   } catch (e) {
     res.status(502).json({ error: e.message });
   }
 });
 
 app.get("/api/bvp", async (req, res) => {
+  const date = req.query.date || todayISO();
   try {
-    res.json(await getBvPEdges(req.query.date || todayISO()));
+    res.json(date === todayISO() ? store.bvp : await onDemandBvP(date));
   } catch (e) {
     res.status(502).json({ error: e.message });
   }
 });
 
 app.get("/api/props", async (req, res) => {
+  const date = req.query.date || todayISO();
   try {
-    res.json(await getPropBoard(req.query.date || todayISO()));
+    res.json(date === todayISO() ? store.props : await onDemandProps(date));
   } catch (e) {
     res.status(502).json({ error: e.message });
   }
 });
 
 app.get("/api/live", async (req, res) => {
+  const date = req.query.date || todayISO();
   try {
-    res.json(await getLiveBoard(req.query.date || todayISO()));
+    res.json(date === todayISO() ? store.liveK : await onDemandLive(date));
   } catch (e) {
     res.status(502).json({ error: e.message });
   }
 });
 
 app.get("/api/workload", async (req, res) => {
+  const date = req.query.date || todayISO();
   try {
-    res.json(await getWorkloadBoard(req.query.date || todayISO()));
+    res.json(date === todayISO() ? store.workload : await onDemandWorkload(date));
   } catch (e) {
     res.status(502).json({ error: e.message });
   }
