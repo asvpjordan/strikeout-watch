@@ -92,6 +92,25 @@ async function getJSONMany(urls, concurrency = 25) {
   return out;
 }
 
+/**
+ * Run `fn` over `items` with at most `limit` in flight at once. Unlike
+ * getJSONMany, `fn` does its own fetch+fold+discard, so nothing holds every
+ * item's full result in memory at the same time — used for the boxscore-heavy
+ * jobs where fetching everything up front risks exceeding a 512MB instance.
+ */
+async function processWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let i = 0;
+  async function worker() {
+    while (i < items.length) {
+      const idx = i++;
+      results[idx] = await fn(items[idx]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 function todayISO() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -373,6 +392,7 @@ async function getSeasonStartAvg(pitcherId, season) {
 // once computed, later requests only need to process newly-completed games.
 const workloadCache = new Map(); // "teamId:season" -> { processed: Set<gamePk>, totalOuts, totalPitches, starts, lastChecked }
 const WORKLOAD_RECHECK_MS = 3 * 60 * 60 * 1000; // 3 hours
+const BOXSCORE_CONCURRENCY = 3; // keep peak boxscores-in-memory low on a 512MB instance
 
 async function getOpponentStarterWorkload(teamId, season) {
   const key = `${teamId}:${season}`;
@@ -395,10 +415,18 @@ async function getOpponentStarterWorkload(teamId, season) {
     .filter((g) => g.status?.abstractGameState === "Final" && !entry.processed.has(g.gamePk))
     .map((g) => g.gamePk);
 
+  // Fetch + fold + discard one boxscore at a time (bounded concurrency) rather than
+  // pulling every game's full boxscore into memory at once before processing any of them.
   if (newGamePks.length) {
-    const boxes = await getJSONMany(newGamePks.map((pk) => `${MLB}/game/${pk}/boxscore`));
-    boxes.forEach((box, i) => {
-      entry.processed.add(newGamePks[i]);
+    await processWithConcurrency(newGamePks, BOXSCORE_CONCURRENCY, async (gamePk) => {
+      let box;
+      try {
+        box = await getJSON(`${MLB}/game/${gamePk}/boxscore`);
+      } catch {
+        entry.processed.add(gamePk);
+        return;
+      }
+      entry.processed.add(gamePk);
       const sides = ["home", "away"];
       const oppSide = sides.find((s) => box?.teams?.[s]?.team?.id && box.teams[s].team.id !== teamId);
       if (!oppSide) return;
@@ -411,12 +439,17 @@ async function getOpponentStarterWorkload(teamId, season) {
       entry.totalOuts += outs;
       entry.totalPitches += Number(line.numberOfPitches || 0);
       entry.starts += 1;
+      // `box` falls out of scope here — nothing retains the full boxscore payload
     });
   }
 
   entry.lastChecked = now;
   workloadCache.set(key, entry);
-  return summarizeWorkload(entry);
+  const summary = summarizeWorkload(entry);
+  // Mirror into the shared store as soon as this team is done, so a crash partway
+  // through the other opponent teams still leaves this one populated for readers.
+  store.workload.byTeam[teamId] = { ...summary, updatedAt: now };
+  return summary;
 }
 
 function summarizeWorkload(entry) {
@@ -441,11 +474,13 @@ async function computeWorkloadBoard(date, dash) {
       legs.push({ pitcher: g.home.pitcher, team: g.home.name, oppTeamId: g.away.teamId, oppName: g.away.name, game: label, isHome: true, time: g.time });
   }
 
+  const oppTeamIds = [...new Set(legs.map((l) => l.oppTeamId))];
   const [ownAvgs, oppWorkloads] = await Promise.all([
     Promise.all(legs.map((l) => getSeasonStartAvg(l.pitcher.id, season))),
-    Promise.all([...new Set(legs.map((l) => l.oppTeamId))].map((id) => getOpponentStarterWorkload(id, season))),
+    // Limited concurrency: each team here walks its full-season boxscore history, and
+    // running all of them at once is what blew past 512MB on Render. See processWithConcurrency.
+    processWithConcurrency(oppTeamIds, 3, (id) => getOpponentStarterWorkload(id, season)),
   ]);
-  const oppTeamIds = [...new Set(legs.map((l) => l.oppTeamId))];
   const oppMap = new Map(oppTeamIds.map((id, i) => [id, oppWorkloads[i]]));
 
   const pitchers = legs.map((l, i) => ({
@@ -591,7 +626,7 @@ const store = {
   props: { updatedAt: null, data: null },
   liveK: { updatedAt: null, data: null },
   bvp: { updatedAt: null, data: null },
-  workload: { updatedAt: null, data: null },
+  workload: { updatedAt: null, data: null, byTeam: {} },
 };
 
 const HOUR_MS = 60 * 60 * 1000;
