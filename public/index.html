@@ -173,6 +173,18 @@
   .swatch:hover { border-color: rgba(255,255,255,0.4); }
   .swatch.active { border-color: #fff; box-shadow: 0 0 0 2px var(--sw); }
   h2 .updated { display: inline-block; margin-left: 10px; font-size: 10px; letter-spacing: 0.05em; text-transform: none; color: var(--faint); }
+
+  .parlay-legs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 640px) { .parlay-legs { grid-template-columns: 1fr; } }
+  .parlay-card { display: flex; flex-direction: column; gap: 8px; }
+  .parlay-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+  .parlay-player { font-size: 15px; font-weight: 600; }
+  .parlay-conf { font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; padding: 3px 8px; border-radius: 10px; border: 1px solid var(--faint); white-space: nowrap; flex-shrink: 0; }
+  .parlay-conf.strong { color: var(--amber); border-color: rgba(var(--amber-rgb),0.5); }
+  .parlay-conf.moderate { color: var(--secondary); border-color: rgba(var(--secondary-rgb),0.4); }
+  .parlay-conf.speculative { color: var(--muted); }
+  .parlay-prop { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--secondary); }
+  .parlay-reasoning { font-size: 13px; color: var(--ink); line-height: 1.45; }
 </style>
 </head>
 <body>
@@ -211,6 +223,7 @@
     <button class="tab-btn" data-tab="workload">Innings/Pitches</button>
     <button class="tab-btn" data-tab="bvp">BvP Edges</button>
     <button class="tab-btn" data-tab="props">Prop Board</button>
+    <button class="tab-btn" data-tab="parlay">AI Parlay Picks</button>
   </nav>
 
   <section class="tab-panel active" data-panel="matchups">
@@ -254,6 +267,11 @@
   <section class="tab-panel" data-panel="props">
     <h2>Strikeout Prop Board <span class="updated" id="propsUpdated"></span> <span style="letter-spacing:0;text-transform:none">(Kalshi lines · season hit rate per line)</span></h2>
     <div id="props" class="loading">Loading prop board…</div>
+  </section>
+
+  <section class="tab-panel" data-panel="parlay">
+    <h2>AI Parlay Picks <span class="updated" id="parlayUpdated"></span> <span style="letter-spacing:0;text-transform:none">(Claude's read on today's strongest strikeout-prop legs)</span></h2>
+    <div id="parlay" class="loading">Loading…</div>
   </section>
 
   <div class="note">Data from MLB Stats API · each board refreshes on its own schedule server-side (see "updated" tags above)</div>
@@ -333,6 +351,7 @@ async function load(date) {
   $("bvp").className = "loading"; $("bvp").textContent = "Loading (this one checks every hitter on every roster — can take a minute)…";
   $("props").className = "loading"; $("props").textContent = "Loading prop board…";
   $("workload").className = "loading"; $("workload").textContent = "Loading (checks every opposing starter's boxscore this season — first load can take a minute)…";
+  $("parlay").className = "loading"; $("parlay").textContent = "Loading…";
 
   loadTab("games", "gamesUpdated", "/api/dashboard?date=" + date, (dash, updatedAt) => {
     renderDash(dash);
@@ -350,10 +369,72 @@ async function load(date) {
 
   loadTab("workload", "workloadUpdated", "/api/workload?date=" + date, renderWorkload,
     "Server is computing Innings/Pitches in the background — retrying…");
+
+  loadParlayPicks();
 }
 
 function loadLive(date) {
   loadTab("live", "liveUpdated", "/api/live?date=" + date, renderLive, "Server is preparing the live board — retrying…");
+}
+
+// AI Parlay Picks has a third state loadTab doesn't model: "unavailable" (no
+// ANTHROPIC_API_KEY configured yet) is a stable end state, not something to retry.
+function loadParlayPicks(opts = {}) {
+  const el = $("parlay");
+  const attempt = (opts.attempt || 0) + 1;
+  fetch("/api/parlay-picks")
+    .then((res) => { if (!res.ok) throw new Error("HTTP " + res.status); return res.json(); })
+    .then((json) => {
+      if (json.unavailable) {
+        el.className = "loading";
+        el.textContent = "AI parlay picks are coming soon — check back once this is turned on.";
+        return;
+      }
+      if (json.data == null) {
+        if (attempt > 24) {
+          el.className = "loading";
+          el.textContent = "Still not available after a while — try Refresh.";
+          return;
+        }
+        el.className = "loading";
+        el.textContent = "Server is generating today's AI parlay picks — retrying…";
+        setTimeout(() => loadParlayPicks({ attempt }), 5000);
+        return;
+      }
+      renderParlayPicks(json.data);
+      setUpdated("parlayUpdated", json.updatedAt);
+    })
+    .catch((e) => {
+      el.innerHTML = '<div class="err">AI parlay picks failed to load (' + e.message + "). Refresh to retry.</div>";
+    });
+}
+
+function confidenceClass(c) {
+  const v = (c || "").toLowerCase();
+  if (v.startsWith("strong")) return "strong";
+  if (v.startsWith("moderate")) return "moderate";
+  return "speculative";
+}
+
+function renderParlayPicks(data) {
+  const el = $("parlay");
+  const legs = data && Array.isArray(data.legs) ? data.legs : [];
+  if (!legs.length) {
+    el.className = "loading";
+    el.textContent = "No strong parlay legs identified today.";
+    return;
+  }
+  el.className = "";
+  el.innerHTML = `<div class="parlay-legs">${legs.map((leg) => `
+      <div class="card parlay-card">
+        <div class="parlay-head">
+          <span class="parlay-player">${leg.player || "—"}</span>
+          <span class="parlay-conf ${confidenceClass(leg.confidence)}">${leg.confidence || ""}</span>
+        </div>
+        <div class="parlay-prop">${leg.prop || ""}</div>
+        <div class="parlay-reasoning">${leg.reasoning || ""}</div>
+      </div>`).join("")}</div>
+    <div class="note">A statistical read of today's numbers, not a guarantee — bet responsibly.</div>`;
 }
 
 function renderDash(dash) {

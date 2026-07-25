@@ -18,6 +18,7 @@ the result for 30 minutes, since that data is static anyway.
 | Prop board (Kalshi lines) | Hourly (bundled with matchups) | Market prices move during the day |
 | BvP edges | Daily, ~6am ET | Career stats vs. a probable pitcher barely move day to day; expensive (one fetch per hitter on every active roster) |
 | Innings/Pitches | Daily, ~6am ET | Season averages; expensive (walks every opposing starter's boxscore) |
+| AI Parlay Picks | Daily, ~6am ET (after BvP/Innings-Pitches) | One Claude API call summarizing the day's numbers into 2-4 suggested parlay legs |
 
 ## What it shows
 
@@ -28,6 +29,8 @@ the result for 30 minutes, since that data is static anyway.
 - Top 50 pitchers by strikeouts
 - Batter-vs-pitcher edges: hitters with 10+ career AB vs a probable pitcher
   who hit .500+ or strike out 50%+ of the time against them
+- AI Parlay Picks: Claude's read on the 2-4 strongest strikeout-prop legs for
+  the day, with reasoning and a confidence label (requires an API key — see below)
 
 ## Run locally
 
@@ -39,6 +42,21 @@ npm start
 ```
 
 Then open http://localhost:3000
+
+### AI Parlay Picks (optional)
+
+The "AI Parlay Picks" tab calls the Anthropic API once a day to turn the day's
+stats into a short list of suggested prop legs. It's fully built but shows a
+"coming soon" placeholder until you set an API key — no code changes needed
+to turn it on:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Export it in your shell before `npm start` for local runs, or set it in
+Render's Settings → Environment for the deployed app, then restart/redeploy.
+The next scheduled daily refresh (~6am ET) populates real picks automatically.
 
 ## Deploy free on Render
 

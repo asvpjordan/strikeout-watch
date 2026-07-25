@@ -8,8 +8,11 @@
  *   GET /api/live?date=YYYY-MM-DD       → live in-game K counts + pace for today's probable pitchers
  *   GET /api/workload?date=YYYY-MM-DD   → each starter's own avg IP/pitches per start vs. how long
  *                                          opposing starters typically last against that lineup
+ *   GET /api/parlay-picks               → AI-picked strongest strikeout-prop legs for today,
+ *                                          computed once a day. { unavailable: true } until
+ *                                          ANTHROPIC_API_KEY is set — no code change needed to turn on.
  *
- * All five responses share the shape { updatedAt, data }, where updatedAt is
+ * All responses share the shape { updatedAt, data }, where updatedAt is
  * the epoch-ms timestamp of the underlying computation (not the request).
  *
  * For today's date, every route is a pure read from an in-memory `store` that
@@ -20,7 +23,8 @@
  * fetched on demand and cached per-date for TTL_MS, same as before.
  *
  * MLB data is fetched server-side from statsapi.mlb.com (free, no key);
- * prop lines come from Kalshi's public market data API (also free, no key).
+ * prop lines come from Kalshi's public market data API (also free, no key);
+ * AI parlay picks use the Anthropic Messages API (requires ANTHROPIC_API_KEY).
  * No CORS issues since everything happens server-side.
  */
 
@@ -620,6 +624,95 @@ function onDemandLive(date) {
   });
 }
 
+// ---------- AI parlay picks ----------
+// Env var with a safe fallback: everything downstream checks ANTHROPIC_API_KEY and
+// degrades gracefully (see getParlayPicks) rather than crashing when it's unset.
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || null;
+const ANTHROPIC_MODEL = "claude-opus-5";
+
+/**
+ * Assemble a compact summary from data already sitting in the store — no MLB API
+ * calls of its own, so this can be built and tested with no ANTHROPIC_API_KEY at all.
+ */
+function buildParlaySummary(dash, bvp, workload) {
+  const topTeamIds = new Set((dash?.topTeams || []).map((t) => t.teamId));
+  const bottomTeamIds = new Set((dash?.bottomTeams || []).map((t) => t.teamId));
+  const pitcherById = new Map((dash?.pitchers || []).map((p) => [p.personId, p]));
+
+  const matchups = [];
+  for (const g of dash?.games || []) {
+    const legs = [
+      { p: g.away.pitcher, oppId: g.home.teamId, opp: g.home.name },
+      { p: g.home.pitcher, oppId: g.away.teamId, opp: g.away.name },
+    ];
+    for (const leg of legs) {
+      if (!leg.p) continue;
+      const stats = pitcherById.get(leg.p.id);
+      matchups.push({
+        pitcher: leg.p.name,
+        opponent: leg.opp,
+        seasonK: stats ? stats.strikeOuts : null,
+        kRank: stats ? stats.rank : null,
+        oppKTier: topTeamIds.has(leg.oppId) ? "top10" : bottomTeamIds.has(leg.oppId) ? "bottom10" : null,
+      });
+    }
+  }
+
+  return {
+    topPitcherKLeaders: (dash?.pitchers || []).slice(0, 15).map((p) => ({
+      name: p.name, team: p.team, rank: p.rank, seasonK: p.strikeOuts,
+    })),
+    topKTeams: (dash?.topTeams || []).map((t) => ({ name: t.name, seasonK: t.strikeOuts })),
+    bottomKTeams: (dash?.bottomTeams || []).map((t) => ({ name: t.name, seasonK: t.strikeOuts })),
+    matchups,
+    bvpEdges: (bvp?.edges || []).map((e) => ({
+      batter: e.batter, batterTeam: e.batterTeam, pitcher: e.pitcher,
+      ab: e.ab, hits: e.hits, avg: e.avg, strikeOuts: e.strikeOuts, kRate: e.kRate, edge: e.edge,
+    })),
+    inningsPitches: (workload?.pitchers || []).map((p) => ({
+      pitcher: p.name, team: p.team, opponent: p.opponent,
+      ownAvgIP: p.own.avgIP, ownAvgPitches: p.own.avgPitches, ownStarts: p.own.starts,
+      oppAllowedAvgIP: p.oppAllowed.avgIP, oppAllowedAvgPitches: p.oppAllowed.avgPitches, oppAllowedStarts: p.oppAllowed.starts,
+    })),
+  };
+}
+
+/** Code-complete, untestable until ANTHROPIC_API_KEY is set — see buildParlaySummary above for the free-to-test half. */
+async function getParlayPicks(summary) {
+  if (!ANTHROPIC_API_KEY) {
+    return { unavailable: true, reason: "AI picks not configured yet" };
+  }
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: ANTHROPIC_MODEL,
+      max_tokens: 1000,
+      messages: [{
+        role: "user",
+        content:
+          "You are analyzing MLB strikeout-prop stats for the day below. " +
+          "Identify the 2-4 strongest individual prop legs for a parlay, " +
+          "based only on the data given. For each: name the player/prop, " +
+          "give a 1-2 sentence statistical reason citing specific numbers " +
+          "from the data, and a confidence label (Strong/Moderate/Speculative). " +
+          "Respond ONLY as JSON: " +
+          '{"legs":[{"player":"","prop":"","reasoning":"","confidence":""}]}' +
+          "\n\nToday's data:\n" + JSON.stringify(summary),
+      }],
+    }),
+  });
+  if (!res.ok) throw new Error(`Anthropic API ${res.status}`);
+  const data = await res.json();
+  if (data.stop_reason === "refusal") throw new Error("Anthropic API declined the request");
+  const text = data.content.map((b) => b.text || "").join("");
+  return JSON.parse(text.replace(/```json|```/g, "").trim());
+}
+
 // ---------- background refresh: in-memory store, kept warm on a schedule ----------
 const store = {
   dashboard: { updatedAt: null, data: null },
@@ -627,6 +720,7 @@ const store = {
   liveK: { updatedAt: null, data: null },
   bvp: { updatedAt: null, data: null },
   workload: { updatedAt: null, data: null, byTeam: {} },
+  parlayPicks: { updatedAt: null, data: null, unavailable: !ANTHROPIC_API_KEY },
 };
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -694,6 +788,20 @@ async function refreshDaily() {
   } catch (e) {
     console.error("[refresh] workload failed:", e.message);
   }
+
+  // AI parlay picks — after bvp/workload so the summary reflects today's real numbers.
+  // getParlayPicks itself no-ops gracefully when ANTHROPIC_API_KEY isn't set.
+  try {
+    const summary = buildParlaySummary(dash, store.bvp.data, store.workload.data);
+    const result = await getParlayPicks(summary);
+    if (result && result.unavailable) {
+      store.parlayPicks = { updatedAt: Date.now(), data: null, unavailable: true };
+    } else {
+      store.parlayPicks = { updatedAt: Date.now(), data: result, unavailable: false };
+    }
+  } catch (e) {
+    console.error("[refresh] parlay picks failed:", e.message);
+  }
 }
 
 let lastDailyRunDate = null;
@@ -760,6 +868,11 @@ app.get("/api/workload", async (req, res) => {
   } catch (e) {
     res.status(502).json({ error: e.message });
   }
+});
+
+// AI parlay picks: today-only, computed once a day in the background — pure read, no date param.
+app.get("/api/parlay-picks", (req, res) => {
+  res.json(store.parlayPicks);
 });
 
 app.use(express.static(path.join(__dirname, "public")));
