@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Strikeout Watch</title>
+<link href="https://fonts.googleapis.com/css2?family=Teko:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #0F1410;
+    --panel: #141B16;
+    --panel-alt: #171F19;
+    --line: rgba(134,239,172,0.06);
+    --amber: #22C55E;
+    --amber-rgb: 34,197,94;
+    --amber-dim: rgba(34,197,94,0.2);
+    --ink: #E7F3EA;
+    --secondary: #86EFAC;
+    --secondary-rgb: 134,239,172;
+    --muted: #4F7A5C;
+    --faint: #334F3C;
+    --red: #C0392B;
+  }
+  [data-theme="orange"] {
+    --bg: #14100C; --panel: #1C150F; --panel-alt: #201811;
+    --line: rgba(253,186,116,0.06);
+    --amber: #F97316; --amber-rgb: 249,115,22; --amber-dim: rgba(249,115,22,0.2);
+    --ink: #F5EAE0;
+    --secondary: #FDBA74; --secondary-rgb: 253,186,116;
+    --muted: #8A6541; --faint: #4F3B26;
+  }
+  [data-theme="blue"] {
+    --bg: #0C1116; --panel: #11181F; --panel-alt: #141C24;
+    --line: rgba(147,197,253,0.06);
+    --amber: #3B82F6; --amber-rgb: 59,130,246; --amber-dim: rgba(59,130,246,0.2);
+    --ink: #E6EEF8;
+    --secondary: #93C5FD; --secondary-rgb: 147,197,253;
+    --muted: #4A6C93; --faint: #26374F;
+  }
+  [data-theme="purple"] {
+    --bg: #130F16; --panel: #19141F; --panel-alt: #1D1724;
+    --line: rgba(216,180,254,0.06);
+    --amber: #A855F7; --amber-rgb: 168,85,247; --amber-dim: rgba(168,85,247,0.2);
+    --ink: #F1E8F9;
+    --secondary: #D8B4FE; --secondary-rgb: 216,180,254;
+    --muted: #7C5A93; --faint: #4A3559;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--ink); font-family: 'Inter', sans-serif; }
+  .mono { font-family: 'IBM Plex Mono', monospace; }
+  .score {
+    font-family: 'Teko', sans-serif; font-weight: 600; letter-spacing: 0.02em;
+    text-shadow: 0 0 12px rgba(var(--amber-rgb),0.55), 0 0 2px rgba(var(--amber-rgb),0.8);
+  }
+  header {
+    border-bottom: 1px solid var(--amber-dim);
+    background: linear-gradient(180deg, var(--panel) 0%, var(--bg) 100%);
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 20px; }
+  .head-inner { display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; gap: 16px; padding: 24px 0; }
+  h1.score { font-size: 52px; line-height: 1; color: var(--ink); }
+  .eyebrow { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--muted); }
+  .controls { display: flex; gap: 10px; }
+  input[type="date"], button {
+    font-family: 'IBM Plex Mono', monospace; font-size: 13px; padding: 8px 12px; border-radius: 6px;
+    background: rgba(var(--amber-rgb),0.08); color: var(--amber); border: 1px solid rgba(var(--amber-rgb),0.3); cursor: pointer;
+  }
+  input[type="date"] { color: var(--ink); background: #18231C; }
+  main { padding: 32px 0 64px; }
+  h2 { font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--muted); margin: 32px 0 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 12px; }
+  .game-head { display: flex; justify-content: space-between; font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--secondary); margin-bottom: 12px; }
+  .legs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 640px) { .legs { grid-template-columns: 1fr; } h1.score { font-size: 40px; } }
+  .leg { display: flex; justify-content: space-between; align-items: center; background: var(--bg); border: 1px solid rgba(var(--secondary-rgb),0.05); border-radius: 8px; padding: 12px; }
+  .leg.hot { border-color: rgba(var(--amber-rgb),0.5); }
+  .leg.cold { border-color: rgba(192,57,43,0.45); }
+  .leg .who { min-width: 0; }
+  .leg .name { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .leg .sub { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--secondary); }
+  .leg .sub .up { color: var(--amber); }
+  .leg .sub .down { color: #E07B6F; }
+  .leg .num { text-align: right; margin-left: 12px; flex-shrink: 0; }
+  .leg .num .k { font-size: 30px; }
+  .leg .num .lab { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--muted); }
+  .tag { display: flex; align-items: center; gap: 6px; margin-top: 10px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; }
+  .tag .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .tag.strong { color: var(--amber); } .tag.strong .dot { background: var(--amber); box-shadow: 0 0 8px 2px var(--amber); }
+  .tag.tough { color: #E07B6F; } .tag.tough .dot { background: var(--red); box-shadow: 0 0 8px 2px var(--red); }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  @media (max-width: 760px) { .cols { grid-template-columns: 1fr; } }
+  table { width: 100%; border-collapse: collapse; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  tr:nth-child(even) td { background: var(--panel-alt); }
+  tr:nth-child(odd) td { background: var(--panel); }
+  td { padding: 9px 14px; font-size: 13px; }
+  td.rk { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--faint); width: 36px; }
+  td.val { text-align: right; }
+  td.val span { font-family: 'Teko', sans-serif; font-weight: 600; font-size: 20px; color: var(--amber); text-shadow: 0 0 10px rgba(var(--amber-rgb),0.4); }
+  td .team-sub { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--secondary); }
+  .note { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--faint); margin-top: 24px; }
+  .err { border: 1px solid rgba(192,57,43,0.4); background: rgba(192,57,43,0.1); border-radius: 8px; padding: 14px; font-size: 13px; margin-bottom: 16px; }
+  .loading { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--muted); padding: 16px 0; }
+  .bvp-edge { font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 2px 6px; border-radius: 4px; }
+  .bvp-edge.batter { color: var(--amber); border: 1px solid rgba(var(--amber-rgb),0.4); }
+  .bvp-edge.pitcher { color: #E07B6F; border: 1px solid rgba(192,57,43,0.45); }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+  .tab-btn {
+    font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--muted); background: none; border: none; border-bottom: 2px solid transparent;
+    border-radius: 0; padding: 14px 18px; cursor: pointer; white-space: nowrap;
+  }
+  .tab-btn:hover { color: var(--ink); }
+  .tab-btn.active { color: var(--secondary); border-bottom-color: var(--amber); }
+  .tab-panel { display: none; padding-top: 28px; }
+  .tab-panel.active { display: block; }
+  .prop-wrap { overflow-x: auto; }
+  table.props { min-width: 760px; }
+  table.props th {
+    font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase;
+    color: var(--muted); text-align: center; padding: 8px 6px; background: var(--panel-alt); border-bottom: 1px solid var(--line);
+  }
+  table.props th:first-child, table.props th:nth-child(2) { text-align: left; }
+  table.props td.pname { white-space: nowrap; font-size: 13px; font-weight: 500; }
+  table.props td.matchup { white-space: nowrap; font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--secondary); }
+  table.props td.line { text-align: center; min-width: 58px; padding: 6px 4px; }
+  table.props td.line.dim { opacity: 0.3; }
+  table.props .rate { font-family: 'Teko', sans-serif; font-weight: 600; font-size: 19px; color: var(--ink); }
+  table.props .frac { font-family: 'IBM Plex Mono', monospace; font-size: 9px; color: var(--muted); }
+  table.props .mkt { font-family: 'IBM Plex Mono', monospace; font-size: 9px; color: var(--amber); margin-top: 2px; }
+
+  .live-game-head { display: flex; justify-content: space-between; align-items: center; font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--secondary); margin-bottom: 12px; }
+  .live-state { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--faint); }
+  .live-state.inprogress { color: var(--amber); border-color: rgba(var(--amber-rgb),0.5); }
+  .live-state.inprogress .pulse { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 6px 2px var(--amber); margin-right: 6px; animation: pulse 1.4s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .live-state.final { color: var(--muted); }
+  .live-legs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 640px) { .live-legs { grid-template-columns: 1fr; } }
+  .live-leg { background: var(--bg); border: 1px solid rgba(var(--secondary-rgb),0.05); border-radius: 8px; padding: 12px; }
+  .live-leg .lname { font-size: 14px; font-weight: 500; }
+  .live-leg .lsub { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--secondary); margin-top: 2px; }
+  .live-leg .lk-row { display: flex; align-items: baseline; gap: 8px; margin-top: 8px; }
+  .live-leg .lk { font-size: 34px; }
+  .live-leg .lk-lab { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--muted); }
+  .live-leg .pace { margin-top: 8px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 6px 8px; border-radius: 6px; background: rgba(var(--secondary-rgb),0.03); }
+  .live-leg .pace.cleared { color: var(--amber); }
+  .live-leg .pace.behind { color: var(--muted); }
+  .live-leg .no-pitcher { color: var(--faint); font-size: 13px; padding: 10px 0; }
+
+  table.workload td.pname { white-space: nowrap; font-size: 13px; font-weight: 500; }
+  table.workload td.matchup { white-space: nowrap; font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--secondary); }
+  table.workload td.wl { text-align: center; padding: 8px 10px; }
+  table.workload .wl-ip { font-family: 'Teko', sans-serif; font-weight: 600; font-size: 20px; color: var(--ink); }
+  table.workload .wl-p { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--muted); }
+  table.workload .wl-n { font-family: 'IBM Plex Mono', monospace; font-size: 9px; color: var(--faint); }
+
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .theme-picker { position: relative; }
+  .tool-brush {
+    width: 38px; height: 38px; padding: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 16px; line-height: 1; border-radius: 8px;
+  }
+  .theme-menu {
+    position: absolute; top: calc(100% + 8px); left: 0; display: none; align-items: center; gap: 10px;
+    padding: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.45); z-index: 20;
+  }
+  .theme-menu.open { display: flex; }
+  .swatch {
+    width: 24px; height: 24px; padding: 0; border-radius: 50%; cursor: pointer;
+    background: var(--sw); border: 2px solid rgba(255,255,255,0.15);
+  }
+  .swatch:hover { border-color: rgba(255,255,255,0.4); }
+  .swatch.active { border-color: #fff; box-shadow: 0 0 0 2px var(--sw); }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap head-inner">
+    <div class="brand">
+      <div class="theme-picker">
+        <button id="themeBtn" class="tool-brush" type="button" title="Theme color" aria-haspopup="true" aria-expanded="false">🖌</button>
+        <div id="themeMenu" class="theme-menu">
+          <button class="swatch" type="button" data-theme="green" style="--sw:#22C55E" title="Green"></button>
+          <button class="swatch" type="button" data-theme="orange" style="--sw:#F97316" title="Orange"></button>
+          <button class="swatch" type="button" data-theme="blue" style="--sw:#3B82F6" title="Blue"></button>
+          <button class="swatch" type="button" data-theme="purple" style="--sw:#A855F7" title="Purple"></button>
+        </div>
+      </div>
+      <div>
+        <div class="eyebrow">⚡ Daily Board</div>
+        <h1 class="score">STRIKEOUT WATCH</h1>
+      </div>
+    </div>
+    <div class="controls">
+      <input type="date" id="datePick" />
+      <button id="refreshBtn">↻ Refresh</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div id="error"></div>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="matchups">Matchups</button>
+    <button class="tab-btn" data-tab="live">Live K Watch</button>
+    <button class="tab-btn" data-tab="teams">Team Strikeouts</button>
+    <button class="tab-btn" data-tab="pitchers">Pitcher Strikeouts</button>
+    <button class="tab-btn" data-tab="workload">Innings/Pitches</button>
+    <button class="tab-btn" data-tab="bvp">BvP Edges</button>
+    <button class="tab-btn" data-tab="props">Prop Board</button>
+  </nav>
+
+  <section class="tab-panel active" data-panel="matchups">
+    <h2>Matchups</h2>
+    <div id="games" class="loading">Loading…</div>
+  </section>
+
+  <section class="tab-panel" data-panel="live">
+    <h2>Live K Watch <span style="letter-spacing:0;text-transform:none">(auto-refreshes every 60s while games are in progress)</span></h2>
+    <div id="live" class="loading">Loading…</div>
+  </section>
+
+  <section class="tab-panel" data-panel="teams">
+    <div class="cols">
+      <section>
+        <h2>Top 10 Team Strikeouts <span style="letter-spacing:0;text-transform:none">(target overs)</span></h2>
+        <table id="topTeams"></table>
+      </section>
+      <section>
+        <h2>Bottom 10 Team Strikeouts <span style="letter-spacing:0;text-transform:none">(toughest to strike out)</span></h2>
+        <table id="bottomTeams"></table>
+      </section>
+    </div>
+  </section>
+
+  <section class="tab-panel" data-panel="pitchers">
+    <h2>Top 50 Pitcher Strikeouts</h2>
+    <table id="pitchers"></table>
+  </section>
+
+  <section class="tab-panel" data-panel="workload">
+    <h2>Innings/Pitches <span style="letter-spacing:0;text-transform:none">(own season avg per start vs. how long opposing starters typically last against this lineup)</span></h2>
+    <div id="workload" class="loading">Loading (checks every opposing starter's boxscore this season — first load can take a minute)…</div>
+  </section>
+
+  <section class="tab-panel" data-panel="bvp">
+    <h2>Batter vs Pitcher Edges <span style="letter-spacing:0;text-transform:none">(10+ AB, .500+ AVG or 50%+ K)</span></h2>
+    <div id="bvp" class="loading">Loading (this one checks every hitter on every roster — can take a minute)…</div>
+  </section>
+
+  <section class="tab-panel" data-panel="props">
+    <h2>Strikeout Prop Board <span style="letter-spacing:0;text-transform:none">(Kalshi lines · season hit rate per line)</span></h2>
+    <div id="props" class="loading">Loading prop board…</div>
+  </section>
+
+  <div class="note">Data from MLB Stats API · cached 30 min server-side</div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function todayISO() {
+  const d = new Date();
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+}
+
+function fmtTime(iso) {
+  try { return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }); }
+  catch { return "TBD"; }
+}
+
+async function load(date) {
+  $("error").innerHTML = "";
+  $("games").className = "loading"; $("games").textContent = "Loading…";
+  $("live").className = "loading"; $("live").textContent = "Loading…";
+  $("bvp").className = "loading"; $("bvp").textContent = "Loading (this one checks every hitter on every roster — can take a minute)…";
+  $("props").className = "loading"; $("props").textContent = "Loading prop board…";
+  $("workload").className = "loading"; $("workload").textContent = "Loading (checks every opposing starter's boxscore this season — first load can take a minute)…";
+
+  let dash;
+  try {
+    const res = await fetch("/api/dashboard?date=" + date);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    dash = await res.json();
+  } catch (e) {
+    $("error").innerHTML = '<div class="err">Couldn\'t load data (' + e.message + "). Hit refresh.</div>";
+    $("games").textContent = ""; $("live").textContent = ""; $("bvp").textContent = ""; $("props").textContent = ""; $("workload").textContent = "";
+    return;
+  }
+
+  renderDash(dash);
+  loadLive(date);
+
+  // BvP, prop board, and workload load separately (and concurrently) since they're slower.
+  fetch("/api/bvp?date=" + date)
+    .then((res) => { if (!res.ok) throw new Error("HTTP " + res.status); return res.json(); })
+    .then(renderBvP)
+    .catch((e) => {
+      $("bvp").innerHTML = '<div class="err">BvP edges failed to load (' + e.message + "). The main board above is unaffected — refresh to retry.</div>";
+    });
+
+  fetch("/api/props?date=" + date)
+    .then((res) => { if (!res.ok) throw new Error("HTTP " + res.status); return res.json(); })
+    .then(renderProps)
+    .catch((e) => {
+      $("props").innerHTML = '<div class="err">Prop board failed to load (' + e.message + "). Refresh to retry.</div>";
+    });
+
+  fetch("/api/workload?date=" + date)
+    .then((res) => { if (!res.ok) throw new Error("HTTP " + res.status); return res.json(); })
+    .then(renderWorkload)
+    .catch((e) => {
+      $("workload").innerHTML = '<div class="err">Innings/Pitches failed to load (' + e.message + "). Refresh to retry.</div>";
+    });
+}
+
+function loadLive(date) {
+  fetch("/api/live?date=" + date)
+    .then((res) => { if (!res.ok) throw new Error("HTTP " + res.status); return res.json(); })
+    .then(renderLive)
+    .catch((e) => {
+      $("live").innerHTML = '<div class="err">Live K Watch failed to load (' + e.message + "). Refresh to retry.</div>";
+    });
+}
+
+function renderDash(dash) {
+  const topIds = new Set(dash.topTeams.map((t) => t.teamId));
+  const bottomIds = new Set(dash.bottomTeams.map((t) => t.teamId));
+  const pMap = new Map(dash.pitchers.map((p) => [p.personId, p]));
+
+  const gamesEl = $("games");
+  gamesEl.className = "";
+  if (!dash.games.length) { gamesEl.className = "loading"; gamesEl.textContent = "No games scheduled for this date."; }
+  else gamesEl.innerHTML = dash.games.map((g) => {
+    const legs = [
+      { p: g.away.pitcher, oppId: g.home.teamId, opp: g.home.name },
+      { p: g.home.pitcher, oppId: g.away.teamId, opp: g.away.name },
+    ].map((leg) => {
+      const stats = leg.p ? pMap.get(leg.p.id) : null;
+      const hot = stats && topIds.has(leg.oppId);
+      const cold = bottomIds.has(leg.oppId);
+      return `
+        <div class="leg ${hot ? "hot" : ""} ${cold ? "cold" : ""}">
+          <div class="who">
+            <div class="name">${leg.p ? leg.p.name : "TBD"}</div>
+            <div class="sub">vs ${leg.opp}${topIds.has(leg.oppId) ? ' <span class="up">· Top-10 K team</span>' : ""}${cold ? ' <span class="down">· Bottom-10 K team</span>' : ""}</div>
+          </div>
+          <div class="num">
+            ${stats ? `<div class="k score" style="color:${hot ? "var(--amber)" : "var(--ink)"}">${stats.strikeOuts}</div><div class="lab">K · #${stats.rank} MLB</div>` : `<div class="lab">—</div>`}
+          </div>
+        </div>`;
+    }).join("");
+
+    const anyStrong = [
+      { p: g.away.pitcher, oppId: g.home.teamId },
+      { p: g.home.pitcher, oppId: g.away.teamId },
+    ].some((l) => l.p && pMap.get(l.p.id) && topIds.has(l.oppId));
+    const anyTough = [g.home.teamId, g.away.teamId].some((id) => bottomIds.has(id));
+
+    return `
+      <div class="card">
+        <div class="game-head"><span>${g.away.name} @ ${g.home.name}</span><span>${fmtTime(g.time)}</span></div>
+        <div class="legs">${legs}</div>
+        ${anyStrong ? '<div class="tag strong"><span class="dot"></span>Strong K spot — leader vs. high-strikeout lineup</div>' : ""}
+        ${anyTough ? '<div class="tag tough"><span class="dot"></span>Caution — low-strikeout lineup in this game</div>' : ""}
+      </div>`;
+  }).join("");
+
+  $("topTeams").innerHTML = dash.topTeams.map((t, i) =>
+    `<tr><td class="rk">${String(i + 1).padStart(2, "0")}</td><td>${t.name}</td><td class="val"><span>${t.strikeOuts}</span></td></tr>`
+  ).join("");
+
+  $("bottomTeams").innerHTML = dash.bottomTeams.map((t, i) =>
+    `<tr><td class="rk">${String(i + 1).padStart(2, "0")}</td><td>${t.name}</td><td class="val"><span>${t.strikeOuts}</span></td></tr>`
+  ).join("");
+
+  $("pitchers").innerHTML = dash.pitchers.map((p) =>
+    `<tr><td class="rk">${String(p.rank).padStart(2, "0")}</td><td>${p.name}<div class="team-sub">${p.team || ""}</div></td><td class="val"><span>${p.strikeOuts}</span></td></tr>`
+  ).join("");
+}
+
+function renderBvP(data) {
+  const el = $("bvp");
+  el.className = "";
+  if (!data.edges.length) {
+    el.className = "loading";
+    el.textContent = "No qualifying edges today (checked " + data.checked + " batter/pitcher histories). That's normal — .500 over 10+ AB is rare.";
+    return;
+  }
+  el.innerHTML = `<table>${data.edges.map((e) => `
+    <tr>
+      <td>${e.batter}<div class="team-sub">${e.batterTeam} · vs ${e.pitcher}</div></td>
+      <td class="mono" style="font-size:11px;color:var(--muted)">${e.hits}/${e.ab} · ${e.strikeOuts}K (${e.kRate}%)</td>
+      <td class="val"><span>${e.avg.toFixed(3).replace(/^0/, "")}</span></td>
+      <td><span class="bvp-edge ${e.edge === "pitcher" ? "pitcher" : "batter"}">${e.edge === "batter" ? "BATTER OWNS" : e.edge === "pitcher" ? "PITCHER OWNS" : "BOTH (!)"}</span></td>
+    </tr>`).join("")}</table>`;
+}
+
+const PROP_LINES = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+
+function heatTier(rate) {
+  if (rate >= 90) return { bg: "color-mix(in srgb, var(--amber) 70%, var(--bg))", text: "var(--ink)" };
+  if (rate >= 70) return { bg: "color-mix(in srgb, var(--amber) 55%, var(--bg))", text: "var(--ink)" };
+  if (rate >= 50) return { bg: "color-mix(in srgb, var(--amber) 28%, var(--bg))", text: "var(--secondary)" };
+  if (rate >= 30) return { bg: "color-mix(in srgb, var(--amber) 16%, var(--bg))", text: "var(--secondary)" };
+  return { bg: "var(--panel-alt)", text: "var(--muted)" };
+}
+
+function renderProps(data) {
+  const el = $("props");
+  el.className = "";
+  if (!data.pitchers.length) {
+    el.className = "loading";
+    el.textContent = "No strikeout prop lines found for this date.";
+    return;
+  }
+
+  const header = `<tr><th>Pitcher</th><th>Matchup</th>${PROP_LINES.map((l) => `<th>${l}+</th>`).join("")}</tr>`;
+
+  const rows = data.pitchers.map((p) => {
+    const matchup = p.opponent ? `${p.isHome ? "vs" : "@"} ${p.opponent}` : "—";
+    const cells = p.lines.map((l) => {
+      if (l.hitRate === null) return `<td class="line dim">—</td>`;
+      const tier = heatTier(l.hitRate);
+      return `<td class="line" style="background:${tier.bg}">
+        <div class="rate" style="color:${tier.text}">${l.hitRate}%</div>
+        <div class="frac">${l.hits}/${p.gamesStarted}</div>
+        ${l.marketPct !== null ? `<div class="mkt">${l.marketPct}¢</div>` : ""}
+      </td>`;
+    }).join("");
+    return `<tr>
+      <td class="pname">${p.name}<div class="team-sub">${p.team || ""}</div></td>
+      <td class="matchup">${matchup}<div class="team-sub">${p.time ? fmtTime(p.time) : ""}</div></td>
+      ${cells}
+    </tr>`;
+  }).join("");
+
+  el.innerHTML = `<div class="prop-wrap"><table class="props">${header}${rows}</table></div>
+    <div class="note">% = season hit rate at that line (starts only) · ¢ = Kalshi market implied probability, where listed</div>`;
+}
+
+function fmtInning(inning) {
+  if (!inning || !inning.num) return "";
+  const half = inning.half === "Top" ? "Top" : inning.half === "Bottom" ? "Bot" : inning.half || "";
+  const outs = inning.outs != null ? `${inning.outs} out${inning.outs === 1 ? "" : "s"}` : "";
+  return [half + " " + inning.num, outs].filter(Boolean).join(" · ");
+}
+
+function renderLiveLeg(p) {
+  if (!p) return '<div class="live-leg"><div class="no-pitcher">No probable pitcher</div></div>';
+  let pace = "";
+  if (p.pace) {
+    const mkt = p.pace.marketPct !== null ? ` · mkt ${p.pace.marketPct}¢` : "";
+    if (p.pace.cleared) {
+      pace = `<div class="pace cleared">✓ Cleared ${p.pace.line}+ K line${mkt}</div>`;
+    } else {
+      const outsLeft = p.pace.outsLeftEst !== null ? ` · ~${outsToIPStr(p.pace.outsLeftEst)} IP left (est.)` : "";
+      pace = `<div class="pace behind">Needs ${p.pace.needed} more K for the ${p.pace.line}+ line${mkt}${outsLeft}</div>`;
+    }
+  } else if (p.avgK !== null) {
+    pace = `<div class="pace behind">Season avg: ${p.avgK} K/start (${p.starts} starts)</div>`;
+  }
+  const proj = p.projectedK !== null ? ` <span class="live-leg-proj" style="color:var(--muted)">(proj. ${p.projectedK})</span>` : "";
+  return `
+    <div class="live-leg">
+      <div class="lname">${p.name}</div>
+      <div class="lsub">${p.inningsPitched} IP · ${p.pitches} pitches${p.avgIP ? ` <span style="color:var(--faint)">(avg ${p.avgIP} IP / ${p.avgPitches} P)</span>` : ""}</div>
+      <div class="lk-row"><div class="lk score">${p.strikeOuts}</div><div class="lk-lab">K${proj}</div></div>
+      ${pace}
+    </div>`;
+}
+
+function outsToIPStr(outs) {
+  return (outs / 3).toFixed(1);
+}
+
+function renderLive(data) {
+  const el = $("live");
+  el.className = "";
+  if (!data.games.length) {
+    el.className = "loading";
+    el.textContent = "No games scheduled for this date.";
+    return;
+  }
+  el.innerHTML = data.games.map((g) => {
+    const isLive = g.abstractState === "Live";
+    const isFinal = g.abstractState === "Final";
+    const stateLabel = isLive ? `<span class="pulse"></span>${fmtInning(g.inning) || "Live"}` : isFinal ? "Final" : fmtTime(g.time);
+    const stateClass = isLive ? "inprogress" : isFinal ? "final" : "";
+    return `
+      <div class="card">
+        <div class="live-game-head">
+          <span>${g.away.name} @ ${g.home.name}</span>
+          <span class="live-state ${stateClass}">${stateLabel}</span>
+        </div>
+        <div class="live-legs">
+          ${renderLiveLeg(g.away.pitcher)}
+          ${renderLiveLeg(g.home.pitcher)}
+        </div>
+      </div>`;
+  }).join("");
+}
+
+function renderWorkload(data) {
+  const el = $("workload");
+  el.className = "";
+  if (!data.pitchers.length) {
+    el.className = "loading";
+    el.textContent = "No probable pitchers found for this date.";
+    return;
+  }
+
+  const header = `<tr><th style="text-align:left">Pitcher</th><th style="text-align:left">Matchup</th><th>Own Avg / Start</th><th>Opp. Starters Avg Vs Them</th></tr>`;
+
+  const rows = data.pitchers.map((p) => {
+    const matchup = p.opponent ? `${p.isHome ? "vs" : "@"} ${p.opponent}` : "—";
+    const own = p.own.starts
+      ? `<div class="wl-ip">${p.own.avgIP} IP</div><div class="wl-p">${p.own.avgPitches} P/start</div><div class="wl-n">${p.own.starts} starts</div>`
+      : `<div class="wl-p">No starts yet</div>`;
+    const opp = p.oppAllowed.starts
+      ? `<div class="wl-ip">${p.oppAllowed.avgIP} IP</div><div class="wl-p">${p.oppAllowed.avgPitches} P/start</div><div class="wl-n">${p.oppAllowed.starts} opp. starts</div>`
+      : `<div class="wl-p">No data</div>`;
+    return `<tr>
+      <td class="pname">${p.name}<div class="team-sub">${p.team || ""}</div></td>
+      <td class="matchup">${matchup}<div class="team-sub">${p.time ? fmtTime(p.time) : ""}</div></td>
+      <td class="wl">${own}</td>
+      <td class="wl">${opp}</td>
+    </tr>`;
+  }).join("");
+
+  el.innerHTML = `<div class="prop-wrap"><table class="props workload">${header}${rows}</table></div>
+    <div class="note">Own = this pitcher's season avg IP/pitches per start · Opp. = avg IP/pitches thrown this season by every opposing starter who's faced this lineup (higher = lineup lets starters go deep, lower = they chase pitchers early)</div>`;
+}
+
+function showTab(name) {
+  document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.dataset.panel === name));
+}
+document.querySelectorAll(".tab-btn").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
+
+// theme picker
+const THEMES = ["green", "orange", "blue", "purple"];
+function applyTheme(t) {
+  if (!THEMES.includes(t)) t = "green";
+  if (t === "green") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", t);
+  document.querySelectorAll("#themeMenu .swatch").forEach((s) => s.classList.toggle("active", s.dataset.theme === t));
+  localStorage.setItem("sw-theme", t);
+}
+const themeBtn = $("themeBtn");
+const themeMenu = $("themeMenu");
+themeBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  const open = themeMenu.classList.toggle("open");
+  themeBtn.setAttribute("aria-expanded", String(open));
+});
+themeMenu.querySelectorAll(".swatch").forEach((s) => {
+  s.addEventListener("click", () => { applyTheme(s.dataset.theme); themeMenu.classList.remove("open"); themeBtn.setAttribute("aria-expanded", "false"); });
+});
+document.addEventListener("click", (e) => {
+  if (!themeMenu.contains(e.target) && e.target !== themeBtn) {
+    themeMenu.classList.remove("open");
+    themeBtn.setAttribute("aria-expanded", "false");
+  }
+});
+applyTheme(localStorage.getItem("sw-theme") || "green");
+
+// init
+const picker = $("datePick");
+picker.value = todayISO();
+picker.addEventListener("change", () => load(picker.value));
+$("refreshBtn").addEventListener("click", () => load(picker.value));
+load(picker.value);
+
+// Live K Watch auto-refreshes on its own cadence, independent of the main refresh button.
+setInterval(() => loadLive(picker.value), 60000);
+</script>
+</body>
+</html>
