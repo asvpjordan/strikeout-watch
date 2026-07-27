@@ -628,7 +628,7 @@ function onDemandLive(date) {
 // Env var with a safe fallback: everything downstream checks ANTHROPIC_API_KEY and
 // degrades gracefully (see getParlayPicks) rather than crashing when it's unset.
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || null;
-const ANTHROPIC_MODEL = "claude-opus-5";
+const ANTHROPIC_MODEL = "claude-sonnet-5";
 
 /**
  * Assemble a compact summary from data already sitting in the store — no MLB API
@@ -713,7 +713,10 @@ async function getParlayPicks(summary) {
       ],
     }),
   });
-  if (!res.ok) throw new Error(`Anthropic API ${res.status}`);
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Anthropic API ${res.status}: ${errBody}`);
+  }
   const data = await res.json();
   if (data.stop_reason === "refusal") throw new Error("Anthropic API declined the request");
   if (data.stop_reason === "max_tokens") {
