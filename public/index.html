@@ -390,6 +390,12 @@ function loadParlayPicks(opts = {}) {
         el.textContent = "AI parlay picks are coming soon — check back once this is turned on.";
         return;
       }
+      if (json.data && json.data.error) {
+        el.className = "loading";
+        el.textContent = json.data.error;
+        setUpdated("parlayUpdated", json.updatedAt);
+        return;
+      }
       if (json.data == null) {
         if (attempt > 24) {
           el.className = "loading";

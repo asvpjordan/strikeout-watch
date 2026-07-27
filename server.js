@@ -691,26 +691,44 @@ async function getParlayPicks(summary) {
     },
     body: JSON.stringify({
       model: ANTHROPIC_MODEL,
-      max_tokens: 1000,
-      messages: [{
-        role: "user",
-        content:
-          "You are analyzing MLB strikeout-prop stats for the day below. " +
-          "Identify the 2-4 strongest individual prop legs for a parlay, " +
-          "based only on the data given. For each: name the player/prop, " +
-          "give a 1-2 sentence statistical reason citing specific numbers " +
-          "from the data, and a confidence label (Strong/Moderate/Speculative). " +
-          "Respond ONLY as JSON: " +
-          '{"legs":[{"player":"","prop":"","reasoning":"","confidence":""}]}' +
-          "\n\nToday's data:\n" + JSON.stringify(summary),
-      }],
+      max_tokens: 4096,
+      messages: [
+        {
+          role: "user",
+          content:
+            "You are analyzing MLB strikeout-prop stats for the day below. " +
+            "Identify the 2-4 strongest individual prop legs for a parlay, " +
+            "based only on the data given. For each: name the player/prop, " +
+            "give a one-sentence statistical reason citing specific numbers " +
+            "from the data (keep it to a single sentence), and a confidence " +
+            "label (Strong/Moderate/Speculative). No extra commentary — keep " +
+            "the total response under 300 words. " +
+            "Respond ONLY as JSON: " +
+            '{"legs":[{"player":"","prop":"","reasoning":"","confidence":""}]}' +
+            "\n\nToday's data:\n" + JSON.stringify(summary),
+        },
+        // Prefill forces the reply to open with valid JSON, skipping any
+        // preamble the model might otherwise ramble through first.
+        { role: "assistant", content: "{" },
+      ],
     }),
   });
   if (!res.ok) throw new Error(`Anthropic API ${res.status}`);
   const data = await res.json();
   if (data.stop_reason === "refusal") throw new Error("Anthropic API declined the request");
-  const text = data.content.map((b) => b.text || "").join("");
-  return JSON.parse(text.replace(/```json|```/g, "").trim());
+  if (data.stop_reason === "max_tokens") {
+    throw new Error("Truncated at max_tokens — response was cut off before completing");
+  }
+  // Re-attach the "{" that was fed as the assistant prefill — the API's reply
+  // continues from it but doesn't repeat it.
+  const text = "{" + data.content.map((b) => b.text || "").join("");
+  try {
+    return JSON.parse(text.replace(/```json|```/g, "").trim());
+  } catch (e) {
+    console.error("[refresh] parlay picks JSON parse failed:", e.message);
+    console.error("[Parlay] raw response:", text);
+    return { error: "AI response was malformed, will retry next refresh" };
+  }
 }
 
 // ---------- background refresh: in-memory store, kept warm on a schedule ----------
@@ -782,11 +800,20 @@ async function refreshDaily() {
   } catch (e) {
     console.error("[refresh] bvp failed:", e.message);
   }
+  console.log("[Innings/Pitches] refresh started");
   try {
     const workload = await computeWorkloadBoard(date, dash);
-    store.workload = { updatedAt: Date.now(), data: workload };
-  } catch (e) {
-    console.error("[refresh] workload failed:", e.message);
+    // Update in place (not `store.workload = {...}`) so `byTeam` — written into
+    // mid-computation by getOpponentStarterWorkload — survives. Replacing the whole
+    // object here used to wipe `byTeam`, which made the *next* run's byTeam write
+    // throw on undefined and silently fail this job every time after the first.
+    store.workload.data = workload;
+    store.workload.updatedAt = Date.now();
+    console.log("[Innings/Pitches] refresh succeeded");
+  } catch (err) {
+    console.error("[Innings/Pitches] refresh FAILED:", err.message);
+    // Deliberately leave store.workload untouched on failure — the previous
+    // good data keeps serving instead of being wiped or left half-written.
   }
 
   // AI parlay picks — after bvp/workload so the summary reflects today's real numbers.
