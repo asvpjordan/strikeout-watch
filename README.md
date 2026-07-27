@@ -18,7 +18,8 @@ the result for 30 minutes, since that data is static anyway.
 | Prop board (Kalshi lines) | Hourly (bundled with matchups) | Market prices move during the day |
 | BvP edges | Daily, ~6am ET | Career stats vs. a probable pitcher barely move day to day; expensive (one fetch per hitter on every active roster) |
 | Innings/Pitches | Daily, ~6am ET | Season averages; expensive (walks every opposing starter's boxscore) |
-| AI Parlay Picks | Daily, ~6am ET (after BvP/Innings-Pitches) | One Claude API call summarizing the day's numbers into 2-6 suggested parlay legs |
+| Sportsbook odds (strikeout props) | Daily, ~6am ET (before AI Parlay Picks) | Player-prop lines only exist for today's games and don't need to be current-to-the-minute for this use case |
+| AI Parlay Picks | Daily, ~6am ET (after BvP/Innings-Pitches/odds) | One Claude API call summarizing the day's numbers — including real sportsbook lines where available — into 2-6 suggested parlay legs |
 
 ## What it shows
 
@@ -29,8 +30,12 @@ the result for 30 minutes, since that data is static anyway.
 - Top 50 pitchers by strikeouts
 - Batter-vs-pitcher edges: hitters with 10+ career AB vs a probable pitcher
   who hit .500+ or strike out 50%+ of the time against them
+- Sportsbook strikeout-prop lines (via The Odds API), shown next to relevant
+  pitchers on the Matchups and Pitcher Strikeouts tabs where a line is found
+  (requires an API key — see below)
 - AI Parlay Picks: Claude's read on the 2-6 strongest strikeout-prop legs for
-  the day, with reasoning and a confidence label (requires an API key — see below)
+  the day — reasoning about whether the real sportsbook line looks mispriced
+  where one's available — with a confidence label (requires an API key — see below)
 
 ## Run locally
 
@@ -57,6 +62,24 @@ ANTHROPIC_API_KEY=sk-ant-...
 Export it in your shell before `npm start` for local runs, or set it in
 Render's Settings → Environment for the deployed app, then restart/redeploy.
 The next scheduled daily refresh (~6am ET) populates real picks automatically.
+
+### Sportsbook strikeout-prop odds (optional)
+
+Shows real prop lines (e.g. "O 6.5 (-115)") next to relevant pitchers, and
+feeds them into the AI Parlay Picks prompt so it can reason about whether a
+specific number looks mispriced instead of just "who looks strong." Same
+degrade-gracefully pattern as the Anthropic key — omit it and the odds
+badges just don't appear, everything else keeps working:
+
+```
+ODDS_API_KEY=...
+```
+
+Get a free key at https://the-odds-api.com (500 requests/month on the free
+tier). Player-prop markets like `pitcher_strikeouts` require one API call
+per game per day (not one call total) — on a normal ~12-15 game slate that's
+roughly 350-450 requests/month, close to the free tier's ceiling, so keep an
+eye on usage on their dashboard and upgrade if you outgrow it.
 
 ## Deploy free on Render
 
@@ -90,4 +113,4 @@ Notes:
 
 - More prop types (outs recorded, hits allowed, walks)
 - Other sports (the pattern is identical: schedule + leaders + matchup flags)
-- Odds feed integration to show actual prop lines next to the stats
+- Cross-book odds averaging instead of preferring a single book (DraftKings)

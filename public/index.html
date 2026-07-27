@@ -198,6 +198,9 @@
   .parlay-conf.speculative { color: var(--muted); }
   .parlay-prop { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--secondary); }
   .parlay-reasoning { font-size: 13px; color: var(--ink); line-height: 1.45; }
+  .parlay-odds { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--amber); }
+
+  .odds-badge { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--amber); }
 </style>
 </head>
 <body>
@@ -304,6 +307,40 @@ function fmtTime(iso) {
   catch { return "TBD"; }
 }
 
+// ---- sportsbook strikeout-prop odds ----
+// Mirrors the server's normalizeName exactly, so lookups here match the keys /api/odds returns.
+function normalizeName(name) {
+  return (name || "")
+    .toLowerCase()
+    .replace(/[.\-']/g, "")
+    .replace(/\s+(jr|sr|ii|iii|iv)$/i, "")
+    .trim();
+}
+
+function fmtOdds(n) {
+  return n > 0 ? "+" + n : String(n);
+}
+
+let oddsByName = {};
+
+async function loadOdds() {
+  try {
+    const res = await fetch("/api/odds");
+    const json = await res.json();
+    oddsByName = json.data || {};
+  } catch {
+    oddsByName = {};
+  }
+}
+
+/** Line badge for a pitcher, or "" if no match — deliberately shows nothing rather than a placeholder. */
+function oddsBadge(pitcherName) {
+  const o = oddsByName[normalizeName(pitcherName)];
+  if (!o || o.line == null) return "";
+  const price = o.overOdds != null ? ` (${fmtOdds(o.overOdds)})` : "";
+  return ` <span class="odds-badge">O ${o.line}${price}</span>`;
+}
+
 // ---- freshness tags ----
 // Each board reports updatedAt (epoch ms) for its own data; the tag text ("3m ago")
 // is re-derived on a timer so it stays honest without re-fetching.
@@ -366,6 +403,10 @@ async function load(date) {
   $("props").className = "loading"; $("props").textContent = "Loading prop board…";
   $("workload").className = "loading"; $("workload").textContent = "Loading (checks every opposing starter's boxscore this season — first load can take a minute)…";
   $("parlay").className = "loading"; $("parlay").textContent = "Loading…";
+
+  // Odds load before matchups/pitchers render, so their pitcher rows can show a
+  // line badge on first paint instead of needing a second re-render once odds land.
+  await loadOdds();
 
   loadTab("games", "gamesUpdated", "/api/dashboard?date=" + date, (dash, updatedAt) => {
     renderDash(dash);
@@ -453,6 +494,7 @@ function renderParlayPicks(data) {
         </div>
         <div class="parlay-prop">${leg.prop || ""}</div>
         <div class="parlay-reasoning">${leg.reasoning || ""}</div>
+        ${leg.odds && leg.odds.line != null ? `<div class="parlay-odds">O ${leg.odds.line}${leg.odds.overOdds != null ? ` (${fmtOdds(leg.odds.overOdds)})` : ""}${leg.odds.book ? ` · ${leg.odds.book}` : ""}</div>` : ""}
       </div>`).join("")}</div>
     <div class="note">A statistical read of today's numbers, not a guarantee — bet responsibly.</div>`;
 }
@@ -477,7 +519,7 @@ function renderDash(dash) {
         <div class="leg ${hot ? "hot" : ""} ${cold ? "cold" : ""}">
           <div class="who">
             <div class="name">${leg.p ? leg.p.name : "TBD"}</div>
-            <div class="sub">vs ${leg.opp}${topIds.has(leg.oppId) ? ' <span class="up">· Top-10 K team</span>' : ""}${cold ? ' <span class="down">· Bottom-10 K team</span>' : ""}</div>
+            <div class="sub">vs ${leg.opp}${topIds.has(leg.oppId) ? ' <span class="up">· Top-10 K team</span>' : ""}${cold ? ' <span class="down">· Bottom-10 K team</span>' : ""}${leg.p ? oddsBadge(leg.p.name) : ""}</div>
           </div>
           <div class="num">
             ${stats ? `<div class="k score" style="color:${hot ? "var(--amber)" : "var(--ink)"}">${stats.strikeOuts}</div><div class="lab">K · #${stats.rank} MLB</div>` : `<div class="lab">—</div>`}
@@ -509,7 +551,7 @@ function renderDash(dash) {
   ).join("");
 
   $("pitchers").innerHTML = dash.pitchers.map((p) =>
-    `<tr><td class="rk">${String(p.rank).padStart(2, "0")}</td><td>${p.name}<div class="team-sub">${p.team || ""}</div></td><td class="val"><span>${p.strikeOuts}</span></td></tr>`
+    `<tr><td class="rk">${String(p.rank).padStart(2, "0")}</td><td>${p.name}<div class="team-sub">${p.team || ""}${oddsBadge(p.name)}</div></td><td class="val"><span>${p.strikeOuts}</span></td></tr>`
   ).join("");
 }
 

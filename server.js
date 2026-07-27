@@ -624,6 +624,84 @@ function onDemandLive(date) {
   });
 }
 
+// ---------- sportsbook strikeout-prop odds (The Odds API) ----------
+// Env var with a safe fallback, same pattern as ANTHROPIC_API_KEY below: everything
+// downstream checks ODDS_API_KEY and degrades gracefully (see computeStrikeoutOdds)
+// rather than crashing when it's unset.
+const ODDS_API_KEY = process.env.ODDS_API_KEY || null;
+const ODDS_API = "https://api.the-odds-api.com/v4";
+// Player-prop markets (pitcher_strikeouts included) aren't priced consistently across
+// books, and the-odds-api's own guidance is that cross-book averaging is a later
+// improvement — for v1 we just prefer one consistent book when it's present.
+const PREFERRED_ODDS_BOOK = "draftkings";
+
+/** "Zachary Wheeler Jr." -> "zachary wheeler" — best-effort match key shared between MLB's and the odds API's name formatting. */
+function normalizeName(name) {
+  return (name || "")
+    .toLowerCase()
+    .replace(/[.\-']/g, "")
+    .replace(/\s+(jr|sr|ii|iii|iv)$/i, "")
+    .trim();
+}
+
+/**
+ * Pitcher strikeout O/U lines for today's games, normalized-name -> { book, line, overOdds, underOdds }.
+ * Player-prop markets live on the per-event odds endpoint, not the bulk /odds endpoint —
+ * so this lists today's events first, then fetches each one's pitcher_strikeouts market.
+ * Any individual event's odds fetch failing (getJSONMany -> null) just means that game's
+ * pitchers end up with no line, not a failed refresh — best-effort enrichment, not a hard dependency.
+ */
+async function computeStrikeoutOdds() {
+  if (!ODDS_API_KEY) return { unavailable: true, lines: {} };
+
+  const events = await getJSON(`${ODDS_API}/sports/baseball_mlb/events?apiKey=${ODDS_API_KEY}`);
+  const eventIds = (Array.isArray(events) ? events : []).map((e) => e.id).filter(Boolean);
+  if (!eventIds.length) return { unavailable: false, lines: {} };
+
+  const urls = eventIds.map(
+    (id) => `${ODDS_API}/sports/baseball_mlb/events/${id}/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=pitcher_strikeouts&oddsFormat=american`
+  );
+  const eventOdds = await getJSONMany(urls);
+
+  const lines = {};
+  for (const game of eventOdds) {
+    if (!game) continue;
+    for (const book of game.bookmakers || []) {
+      const market = (book.markets || []).find((m) => m.key === "pitcher_strikeouts");
+      if (!market) continue;
+      const isPreferred = (book.key || book.title || "").toLowerCase() === PREFERRED_ODDS_BOOK;
+      for (const outcome of market.outcomes || []) {
+        const rawName = outcome.description || outcome.name;
+        if (!rawName || outcome.point == null) continue;
+        const key = normalizeName(rawName);
+        const existing = lines[key];
+        // Keep whichever book we saw first for this pitcher, unless this one is the preferred book.
+        if (existing && existing.book !== book.title && !isPreferred) continue;
+        if (!existing || existing.book !== book.title) {
+          lines[key] = { book: book.title, line: outcome.point, overOdds: null, underOdds: null };
+        }
+        const side = (outcome.name || "").toLowerCase();
+        if (side === "over") lines[key].overOdds = outcome.price;
+        else if (side === "under") lines[key].underOdds = outcome.price;
+      }
+    }
+  }
+  return { unavailable: false, lines };
+}
+
+/** How many of today's probable pitchers matched a line — logged so bad name-matching surfaces immediately instead of silently. */
+function countOddsMatches(dash, lines) {
+  let total = 0, matched = 0;
+  for (const g of dash?.games || []) {
+    for (const pitcher of [g.away.pitcher, g.home.pitcher]) {
+      if (!pitcher) continue;
+      total++;
+      if (lines[normalizeName(pitcher.name)]) matched++;
+    }
+  }
+  return { matched, total };
+}
+
 // ---------- AI parlay picks ----------
 // Env var with a safe fallback: everything downstream checks ANTHROPIC_API_KEY and
 // degrades gracefully (see getParlayPicks) rather than crashing when it's unset.
@@ -634,7 +712,7 @@ const ANTHROPIC_MODEL = "claude-sonnet-5";
  * Assemble a compact summary from data already sitting in the store — no MLB API
  * calls of its own, so this can be built and tested with no ANTHROPIC_API_KEY at all.
  */
-function buildParlaySummary(dash, bvp, workload) {
+function buildParlaySummary(dash, bvp, workload, oddsLines) {
   const topTeamIds = new Set((dash?.topTeams || []).map((t) => t.teamId));
   const bottomTeamIds = new Set((dash?.bottomTeams || []).map((t) => t.teamId));
   const pitcherById = new Map((dash?.pitchers || []).map((p) => [p.personId, p]));
@@ -648,12 +726,16 @@ function buildParlaySummary(dash, bvp, workload) {
     for (const leg of legs) {
       if (!leg.p) continue;
       const stats = pitcherById.get(leg.p.id);
+      const odds = oddsLines ? oddsLines[normalizeName(leg.p.name)] : null;
       matchups.push({
         pitcher: leg.p.name,
         opponent: leg.opp,
         seasonK: stats ? stats.strikeOuts : null,
         kRank: stats ? stats.rank : null,
         oppKTier: topTeamIds.has(leg.oppId) ? "top10" : bottomTeamIds.has(leg.oppId) ? "bottom10" : null,
+        propLine: odds ? odds.line : null,
+        overOdds: odds ? odds.overOdds : null,
+        underOdds: odds ? odds.underOdds : null,
       });
     }
   }
@@ -697,6 +779,15 @@ async function getParlayPicks(summary) {
           role: "user",
           content:
             "You are analyzing MLB strikeout-prop stats for the day below. " +
+            "For each probable pitcher, you're given their season strikeout " +
+            "stats, matchup context, and — where available — the current " +
+            "sportsbook prop line and odds. Where a line is available, reason " +
+            "specifically about whether that number looks mispriced given the " +
+            "stats (e.g. a line of 6.5 against a team that makes contact " +
+            "easily may be set too high; a line of 4.5 against a top-10 K " +
+            "lineup may be set too low). Where no line is available, note " +
+            "that explicitly and reason from stats alone as before. Do not " +
+            "select multiple legs on the same pitcher/game. " +
             "Identify the 2-6 strongest individual prop legs for a parlay, " +
             "based only on the data given. For each: name the player/prop, " +
             "give a one-sentence statistical reason citing specific numbers " +
@@ -741,6 +832,7 @@ const store = {
   liveK: { updatedAt: null, data: null },
   bvp: { updatedAt: null, data: null },
   workload: { updatedAt: null, data: null, byTeam: {} },
+  oddsLines: { updatedAt: null, data: null, unavailable: !ODDS_API_KEY },
   parlayPicks: { updatedAt: null, data: null, unavailable: !ANTHROPIC_API_KEY },
 };
 
@@ -819,13 +911,45 @@ async function refreshDaily() {
     // good data keeps serving instead of being wiped or left half-written.
   }
 
-  // AI parlay picks — after bvp/workload so the summary reflects today's real numbers.
+  console.log("[Odds] refresh started");
+  try {
+    const odds = await computeStrikeoutOdds();
+    if (odds.unavailable) {
+      store.oddsLines.data = null;
+      store.oddsLines.updatedAt = Date.now();
+      store.oddsLines.unavailable = true;
+      console.log("[Odds] refresh skipped — ODDS_API_KEY not set");
+    } else {
+      store.oddsLines.data = odds.lines;
+      store.oddsLines.updatedAt = Date.now();
+      store.oddsLines.unavailable = false;
+      const { matched, total } = countOddsMatches(dash, odds.lines);
+      console.log(`[Odds] refresh succeeded — ${matched}/${total} probable pitchers matched to a line`);
+    }
+  } catch (err) {
+    console.error("[Odds] refresh FAILED:", err.message);
+    // Same pattern as Innings/Pitches: leave store.oddsLines untouched on failure
+    // rather than wiping out yesterday's lines or blocking the parlay-picks step below.
+  }
+
+  // AI parlay picks — after bvp/workload/odds so the summary reflects today's real numbers.
   // getParlayPicks itself no-ops gracefully when ANTHROPIC_API_KEY isn't set.
   try {
-    const summary = buildParlaySummary(dash, store.bvp.data, store.workload.data);
+    const summary = buildParlaySummary(dash, store.bvp.data, store.workload.data, store.oddsLines.data);
     const result = await getParlayPicks(summary);
     if (result && result.unavailable) {
       store.parlayPicks = { updatedAt: Date.now(), data: null, unavailable: true };
+    } else if (result && Array.isArray(result.legs)) {
+      // Re-attach the verified real line/odds by name rather than trusting whatever
+      // number the model transcribed into its own "prop" text field.
+      const legs = result.legs.map((leg) => {
+        const odds = leg.player && store.oddsLines.data ? store.oddsLines.data[normalizeName(leg.player)] : null;
+        return {
+          ...leg,
+          odds: odds ? { line: odds.line, overOdds: odds.overOdds, underOdds: odds.underOdds, book: odds.book } : null,
+        };
+      });
+      store.parlayPicks = { updatedAt: Date.now(), data: { legs }, unavailable: false };
     } else {
       store.parlayPicks = { updatedAt: Date.now(), data: result, unavailable: false };
     }
@@ -903,6 +1027,12 @@ app.get("/api/workload", async (req, res) => {
 // AI parlay picks: today-only, computed once a day in the background — pure read, no date param.
 app.get("/api/parlay-picks", (req, res) => {
   res.json(store.parlayPicks);
+});
+
+// Sportsbook strikeout-prop odds: today-only, computed once a day in the background —
+// pure read, no date param. { data: null, unavailable: true } until ODDS_API_KEY is set.
+app.get("/api/odds", (req, res) => {
+  res.json(store.oddsLines);
 });
 
 app.use(express.static(path.join(__dirname, "public")));
