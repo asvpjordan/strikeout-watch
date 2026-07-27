@@ -705,11 +705,11 @@ async function getParlayPicks(summary) {
             "the total response under 300 words. " +
             "Respond ONLY as JSON: " +
             '{"legs":[{"player":"","prop":"","reasoning":"","confidence":""}]}' +
+            "\n\nRespond with ONLY valid JSON, no markdown code fences, no " +
+            "explanation before or after. Your entire response must be a " +
+            "single JSON object starting with { and ending with }." +
             "\n\nToday's data:\n" + JSON.stringify(summary),
         },
-        // Prefill forces the reply to open with valid JSON, skipping any
-        // preamble the model might otherwise ramble through first.
-        { role: "assistant", content: "{" },
       ],
     }),
   });
@@ -722,11 +722,11 @@ async function getParlayPicks(summary) {
   if (data.stop_reason === "max_tokens") {
     throw new Error("Truncated at max_tokens — response was cut off before completing");
   }
-  // Re-attach the "{" that was fed as the assistant prefill — the API's reply
-  // continues from it but doesn't repeat it.
-  const text = "{" + data.content.map((b) => b.text || "").join("");
+  const text = data.content.map((b) => b.text || "").join("");
+  // Defensive cleanup in case the model wraps the JSON in fences despite being told not to.
+  const cleaned = text.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "");
   try {
-    return JSON.parse(text.replace(/```json|```/g, "").trim());
+    return JSON.parse(cleaned);
   } catch (e) {
     console.error("[refresh] parlay picks JSON parse failed:", e.message);
     console.error("[Parlay] raw response:", text);
