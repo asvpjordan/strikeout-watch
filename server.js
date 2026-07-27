@@ -697,12 +697,12 @@ async function getParlayPicks(summary) {
           role: "user",
           content:
             "You are analyzing MLB strikeout-prop stats for the day below. " +
-            "Identify the 2-4 strongest individual prop legs for a parlay, " +
+            "Identify the 2-6 strongest individual prop legs for a parlay, " +
             "based only on the data given. For each: name the player/prop, " +
             "give a one-sentence statistical reason citing specific numbers " +
             "from the data (keep it to a single sentence), and a confidence " +
             "label (Strong/Moderate/Speculative). No extra commentary — keep " +
-            "the total response under 300 words. " +
+            "the total response under 450 words. " +
             "Respond ONLY as JSON: " +
             '{"legs":[{"player":"","prop":"","reasoning":"","confidence":""}]}' +
             "\n\nRespond with ONLY valid JSON, no markdown code fences, no " +

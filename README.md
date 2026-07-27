@@ -18,7 +18,7 @@ the result for 30 minutes, since that data is static anyway.
 | Prop board (Kalshi lines) | Hourly (bundled with matchups) | Market prices move during the day |
 | BvP edges | Daily, ~6am ET | Career stats vs. a probable pitcher barely move day to day; expensive (one fetch per hitter on every active roster) |
 | Innings/Pitches | Daily, ~6am ET | Season averages; expensive (walks every opposing starter's boxscore) |
-| AI Parlay Picks | Daily, ~6am ET (after BvP/Innings-Pitches) | One Claude API call summarizing the day's numbers into 2-4 suggested parlay legs |
+| AI Parlay Picks | Daily, ~6am ET (after BvP/Innings-Pitches) | One Claude API call summarizing the day's numbers into 2-6 suggested parlay legs |
 
 ## What it shows
 
@@ -29,7 +29,7 @@ the result for 30 minutes, since that data is static anyway.
 - Top 50 pitchers by strikeouts
 - Batter-vs-pitcher edges: hitters with 10+ career AB vs a probable pitcher
   who hit .500+ or strike out 50%+ of the time against them
-- AI Parlay Picks: Claude's read on the 2-4 strongest strikeout-prop legs for
+- AI Parlay Picks: Claude's read on the 2-6 strongest strikeout-prop legs for
   the day, with reasoning and a confidence label (requires an API key — see below)
 
 ## Run locally
