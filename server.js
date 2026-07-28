@@ -948,12 +948,14 @@ async function getParlayPicks(summary) {
             "line that already prices that in is not an edge. Prefer spots " +
             "where the projection and the line disagree. Do not select " +
             "multiple legs on the same pitcher/game. " +
-            "Identify the 2-6 strongest individual prop legs for a parlay, " +
-            "based only on the data given. For each: name the player/prop, " +
-            "give a one-sentence statistical reason citing specific numbers " +
-            "from the data (keep it to a single sentence), and a confidence " +
-            "label (Strong/Moderate/Speculative). No extra commentary — keep " +
-            "the total response under 450 words. " +
+            "Identify up to 6 of the strongest individual prop legs for a " +
+            "parlay, based only on the data given. For each: name the " +
+            "player/prop, give a one-sentence statistical reason citing " +
+            "specific numbers from the data (keep it to a single sentence), " +
+            "and a confidence label (Strong/Moderate/Speculative). If no " +
+            "legs meet the bar today, return an empty legs array rather " +
+            "than forcing picks. No extra commentary — keep the total " +
+            "response under 450 words. " +
             "Respond ONLY as JSON: " +
             '{"legs":[{"player":"","prop":"","reasoning":"","confidence":""}]}' +
             "\n\nRespond with ONLY valid JSON, no markdown code fences, no " +
