@@ -71,9 +71,10 @@
   .game-head { display: flex; justify-content: space-between; font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--secondary); margin-bottom: 12px; }
   .legs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   @media (max-width: 640px) { .legs { grid-template-columns: 1fr; } h1.score { font-size: 40px; } }
-  .leg { display: flex; justify-content: space-between; align-items: center; background: var(--bg); border: 1px solid rgba(var(--secondary-rgb),0.05); border-radius: 8px; padding: 12px; }
+  .leg { display: flex; flex-direction: column; gap: 8px; background: var(--bg); border: 1px solid rgba(var(--secondary-rgb),0.05); border-radius: 8px; padding: 12px; }
   .leg.hot { border-color: rgba(var(--amber-rgb),0.5); }
   .leg.cold { border-color: rgba(192,57,43,0.45); }
+  .leg-top { display: flex; justify-content: space-between; align-items: center; }
   .leg .who { min-width: 0; }
   .leg .name { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .leg .sub { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--secondary); }
@@ -82,6 +83,15 @@
   .leg .num { text-align: right; margin-left: 12px; flex-shrink: 0; }
   .leg .num .k { font-size: 30px; }
   .leg .num .lab { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--muted); }
+
+  .leg-grade { display: flex; align-items: center; gap: 8px; padding-top: 8px; border-top: 1px solid rgba(var(--secondary-rgb),0.06); cursor: default; }
+  .leg-grade.no-data { color: var(--faint); font-family: 'IBM Plex Mono', monospace; font-size: 11px; }
+  .grade-pill { font-family: 'Teko', sans-serif; font-weight: 600; font-size: 20px; line-height: 1; padding: 3px 9px; border-radius: 6px; background: var(--panel-alt); color: var(--muted); border: 1px solid var(--faint); }
+  .grade-pill.high { color: var(--bg); background: var(--amber); border-color: var(--amber); box-shadow: 0 0 10px 1px rgba(var(--amber-rgb),0.5); }
+  .grade-pill.mid { color: var(--ink); background: rgba(var(--secondary-rgb),0.15); border-color: rgba(var(--secondary-rgb),0.4); }
+  .leg-grade .grade-detail { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--secondary); }
+  .leg-grade .grade-detail .completeness { color: var(--faint); }
+  .leg-grade[data-completeness="sparse"] .grade-pill, .leg-grade[data-completeness="partial"] .grade-pill { opacity: 0.65; }
   .tag { display: flex; align-items: center; gap: 6px; margin-top: 10px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; }
   .tag .dot { width: 6px; height: 6px; border-radius: 50%; }
   .tag.strong { color: var(--amber); } .tag.strong .dot { background: var(--amber); box-shadow: 0 0 8px 2px var(--amber); }
@@ -366,6 +376,43 @@ function oddsBadge(pitcherName) {
   return ` <span class="odds-badge">O ${o.line}${price}</span>`;
 }
 
+// ---- matchup grades (deterministic 1-10 projection) ----
+let gradesByPitcherId = {};
+
+async function loadGrades() {
+  try {
+    const res = await fetch("/api/matchup-grades");
+    const json = await res.json();
+    const grades = (json.data && json.data.grades) || [];
+    gradesByPitcherId = {};
+    grades.forEach((g) => { gradesByPitcherId[g.pitcherId] = g; });
+  } catch {
+    gradesByPitcherId = {};
+  }
+}
+
+function gradeTier(grade) {
+  if (grade >= 8) return "high";
+  if (grade >= 6) return "mid";
+  return "";
+}
+
+/** Grade row for a leg, or a "not enough data" row if ungraded / not loaded yet. */
+function gradeRow(pitcherId) {
+  const g = gradesByPitcherId[pitcherId];
+  if (!g) return "";
+  if (g.grade === null) {
+    return `<div class="leg-grade no-data">Not enough data to grade this matchup yet</div>`;
+  }
+  const notes = (g.notes || []).join(" — ").replace(/"/g, "&quot;");
+  const completenessNote = g.dataCompleteness !== "full" ? ` <span class="completeness">(${g.dataCompleteness} data)</span>` : "";
+  return `
+    <div class="leg-grade" data-completeness="${g.dataCompleteness}" title="${notes}">
+      <span class="grade-pill ${gradeTier(g.grade)}">${g.grade}</span>
+      <span class="grade-detail">proj. ${g.projectedK} K${completenessNote}</span>
+    </div>`;
+}
+
 // ---- freshness tags ----
 // Each board reports updatedAt (epoch ms) for its own data; the tag text ("3m ago")
 // is re-derived on a timer so it stays honest without re-fetching.
@@ -430,9 +477,9 @@ async function load(date) {
   $("parlay").className = "loading"; $("parlay").textContent = "Loading…";
   $("track").className = "loading"; $("track").textContent = "Loading…";
 
-  // Odds load before matchups/pitchers render, so their pitcher rows can show a
-  // line badge on first paint instead of needing a second re-render once odds land.
-  await loadOdds();
+  // Odds and grades load before matchups/pitchers render, so their pitcher rows can
+  // show a line badge and grade pill on first paint instead of a second re-render.
+  await Promise.all([loadOdds(), loadGrades()]);
 
   loadTab("games", "gamesUpdated", "/api/dashboard?date=" + date, (dash, updatedAt) => {
     renderDash(dash);
@@ -610,20 +657,29 @@ function renderDash(dash) {
       const cold = bottomIds.has(leg.oppId);
       return `
         <div class="leg ${hot ? "hot" : ""} ${cold ? "cold" : ""}">
-          <div class="who">
-            <div class="name">${leg.p ? leg.p.name : "TBD"}</div>
-            <div class="sub">vs ${leg.opp}${topIds.has(leg.oppId) ? ' <span class="up">· Top-10 K team</span>' : ""}${cold ? ' <span class="down">· Bottom-10 K team</span>' : ""}${leg.p ? oddsBadge(leg.p.name) : ""}</div>
+          <div class="leg-top">
+            <div class="who">
+              <div class="name">${leg.p ? leg.p.name : "TBD"}</div>
+              <div class="sub">vs ${leg.opp}${topIds.has(leg.oppId) ? ' <span class="up">· Top-10 K team</span>' : ""}${cold ? ' <span class="down">· Bottom-10 K team</span>' : ""}${leg.p ? oddsBadge(leg.p.name) : ""}</div>
+            </div>
+            <div class="num">
+              ${stats ? `<div class="k score" style="color:${hot ? "var(--amber)" : "var(--ink)"}">${stats.strikeOuts}</div><div class="lab">K · #${stats.rank} MLB</div>` : `<div class="lab">—</div>`}
+            </div>
           </div>
-          <div class="num">
-            ${stats ? `<div class="k score" style="color:${hot ? "var(--amber)" : "var(--ink)"}">${stats.strikeOuts}</div><div class="lab">K · #${stats.rank} MLB</div>` : `<div class="lab">—</div>`}
-          </div>
+          ${leg.p ? gradeRow(leg.p.id) : ""}
         </div>`;
     }).join("");
 
-    const anyStrong = [
+    // Prefer the computed grade (7+ = strong) once it's loaded; fall back to the
+    // simpler "K leader vs. top-10 lineup" heuristic before grades are available.
+    const legPitchers = [
       { p: g.away.pitcher, oppId: g.home.teamId },
       { p: g.home.pitcher, oppId: g.away.teamId },
-    ].some((l) => l.p && pMap.get(l.p.id) && topIds.has(l.oppId));
+    ];
+    const anyGraded = legPitchers.some((l) => l.p && gradesByPitcherId[l.p.id]);
+    const anyStrong = anyGraded
+      ? legPitchers.some((l) => l.p && gradesByPitcherId[l.p.id]?.grade >= 7)
+      : legPitchers.some((l) => l.p && pMap.get(l.p.id) && topIds.has(l.oppId));
     const anyTough = [g.home.teamId, g.away.teamId].some((id) => bottomIds.has(id));
 
     return `

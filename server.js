@@ -8,6 +8,9 @@
  *   GET /api/live?date=YYYY-MM-DD       → live in-game K counts + pace for today's probable pitchers
  *   GET /api/workload?date=YYYY-MM-DD   → each starter's own avg IP/pitches per start vs. how long
  *                                          opposing starters typically last against that lineup
+ *   GET /api/matchup-grades             → deterministic 1-10 matchup grade + projected K total
+ *                                          per probable pitcher today, re-graded once lineups
+ *                                          confirm in the afternoon
  *   GET /api/parlay-picks               → AI-picked strongest strikeout-prop legs for today,
  *                                          computed once a day. { unavailable: true } until
  *                                          ANTHROPIC_API_KEY is set — no code change needed to turn on.
@@ -31,6 +34,12 @@
 const express = require("express");
 const path = require("path");
 const { logPicks, gradePicks, getPicksStats } = require("./picks-tracking");
+const {
+  getRecentForm,
+  getAllTeamSplits,
+  getLineupStatus,
+  gradeMatchup,
+} = require("./matchup-grading");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -131,10 +140,16 @@ function currentHourET() {
 async function computeDashboard(date) {
   const season = date.slice(0, 4);
   const [sched, teamStats, leaders] = await Promise.all([
-    getJSON(`${MLB}/schedule?sportId=1&date=${date}&hydrate=probablePitcher,team`),
+    // `person` added alongside probablePitcher so pitchHand.code comes along for free
+    // (needed by matchup grading's handedness adjustment) instead of costing 30 extra calls.
+    getJSON(`${MLB}/schedule?sportId=1&date=${date}&hydrate=probablePitcher,team,person`),
     getJSON(`${MLB}/teams/stats?season=${season}&sportIds=1&group=hitting&stats=season`),
     getJSON(`${MLB}/stats/leaders?leaderCategories=strikeouts&statGroup=pitching&sportId=1&season=${season}&limit=50`),
   ]);
+
+  function toPitcher(p) {
+    return p ? { id: p.id, name: p.fullName, pitchHand: p.pitchHand?.code || null } : null;
+  }
 
   const games = (sched?.dates?.[0]?.games || []).map((g) => ({
     gamePk: g.gamePk,
@@ -143,16 +158,12 @@ async function computeDashboard(date) {
     away: {
       teamId: g.teams?.away?.team?.id,
       name: g.teams?.away?.team?.name,
-      pitcher: g.teams?.away?.probablePitcher
-        ? { id: g.teams.away.probablePitcher.id, name: g.teams.away.probablePitcher.fullName }
-        : null,
+      pitcher: toPitcher(g.teams?.away?.probablePitcher),
     },
     home: {
       teamId: g.teams?.home?.team?.id,
       name: g.teams?.home?.team?.name,
-      pitcher: g.teams?.home?.probablePitcher
-        ? { id: g.teams.home.probablePitcher.id, name: g.teams.home.probablePitcher.fullName }
-        : null,
+      pitcher: toPitcher(g.teams?.home?.probablePitcher),
     },
   }));
 
@@ -161,12 +172,20 @@ async function computeDashboard(date) {
       teamId: s.team?.id,
       name: s.team?.name,
       strikeOuts: Number(s.stat?.strikeOuts || 0),
+      plateAppearances: Number(s.stat?.plateAppearances || 0),
     }))
     .filter((t) => t.teamId)
     .sort((a, b) => b.strikeOuts - a.strikeOuts);
 
   const topTeams = allTeams.slice(0, 10);
   const bottomTeams = allTeams.slice(-10).reverse();
+
+  // Overall team K rate (K / PA) — fallback input for matchup grading when a
+  // handedness-specific split isn't available.
+  const teamKRates = {};
+  for (const t of allTeams) {
+    if (t.plateAppearances) teamKRates[t.teamId] = t.strikeOuts / t.plateAppearances;
+  }
 
   const pitchers = (leaders?.leagueLeaders?.[0]?.leaders || []).map((l) => ({
     rank: l.rank,
@@ -176,7 +195,7 @@ async function computeDashboard(date) {
     strikeOuts: Number(l.value || 0),
   }));
 
-  return { date, games, topTeams, bottomTeams, pitchers };
+  return { date, games, topTeams, bottomTeams, pitchers, teamKRates };
 }
 
 async function computeBvPEdges(date, dash) {
@@ -510,6 +529,132 @@ async function computeWorkloadBoard(date, dash) {
   return { date, season, pitchers };
 }
 
+// ---------- matchup grading (deterministic 1-10 projection) ----------
+// Ingredients cached here (module-level, today's slate only) so the afternoon
+// lineup-confirmation pass can re-grade with lineupConfirmed=true by reusing
+// the morning's form/splits fetches instead of hitting MLB's API again.
+let gradingIngredients = new Map(); // pitcherId -> { form, pitchHand, oppSplit, oppKRateOverall, oppIPAllowed, gamePk }
+let gradingLeagueAvg = null;
+let lineupConfirmedPitchers = new Set();
+
+async function computeMatchupGrades(date, dash) {
+  if (!dash) dash = await computeDashboard(date);
+  const season = date.slice(0, 4);
+
+  const legs = [];
+  for (const g of dash.games) {
+    if (g.away.pitcher) legs.push({ pitcher: g.away.pitcher, oppTeamId: g.home.teamId, gamePk: g.gamePk });
+    if (g.home.pitcher) legs.push({ pitcher: g.home.pitcher, oppTeamId: g.away.teamId, gamePk: g.gamePk });
+  }
+  if (!legs.length) return { date, season, grades: [] };
+
+  const teamIds = [...new Set(dash.games.flatMap((g) => [g.away.teamId, g.home.teamId]).filter(Boolean))];
+
+  const [forms, splitsResult] = await Promise.all([
+    processWithConcurrency(legs, 3, (l) => getRecentForm(l.pitcher.id, season, date)),
+    getAllTeamSplits(teamIds, season),
+  ]);
+
+  gradingIngredients = new Map();
+  gradingLeagueAvg = splitsResult.leagueAvg;
+  lineupConfirmedPitchers = new Set();
+
+  const grades = legs.map((l, i) => {
+    const form = forms[i];
+    const oppSplit = splitsResult.byTeam[l.oppTeamId];
+    const oppKRateOverall = dash.teamKRates ? dash.teamKRates[l.oppTeamId] : null;
+    const oppIPAllowed = store.workload.byTeam[l.oppTeamId]?.avgIP ?? null;
+
+    gradingIngredients.set(l.pitcher.id, {
+      form, pitchHand: l.pitcher.pitchHand, oppSplit, oppKRateOverall, oppIPAllowed, gamePk: l.gamePk,
+    });
+
+    const result = gradeMatchup({
+      form,
+      pitchHand: l.pitcher.pitchHand,
+      oppSplit,
+      leagueAvg: splitsResult.leagueAvg,
+      oppKRateOverall,
+      oppIPAllowed,
+      lineupConfirmed: false,
+    });
+
+    return { pitcherId: l.pitcher.id, pitcherName: l.pitcher.name, gamePk: l.gamePk, ...result };
+  });
+
+  return { date, season, grades };
+}
+
+/**
+ * Re-grade any starters whose lineup just confirmed, reusing the morning's
+ * cached form/splits — the only new fetch here is the lineup check itself.
+ * Safe to call repeatedly: no-ops once every starter today is confirmed.
+ */
+async function refreshLineupConfirmations(date) {
+  if (!store.matchupGrades.data || !gradingIngredients.size) return;
+  if (lineupConfirmedPitchers.size >= gradingIngredients.size) return;
+
+  let statuses;
+  try {
+    statuses = await getLineupStatus(date);
+  } catch (e) {
+    console.error("[Grading] lineup check failed:", e.message);
+    return;
+  }
+
+  const gamesByPk = new Map((store.dashboard.data?.games || []).map((g) => [g.gamePk, g]));
+  let changed = false;
+
+  const newGrades = store.matchupGrades.data.grades.map((entry) => {
+    if (lineupConfirmedPitchers.has(entry.pitcherId)) return entry;
+    const status = statuses[entry.gamePk];
+    const g = gamesByPk.get(entry.gamePk);
+    if (!status || !g) return entry;
+    const isHome = g.home?.pitcher?.id === entry.pitcherId;
+    const confirmed = isHome ? status.home : status.away;
+    if (!confirmed) return entry;
+
+    const ing = gradingIngredients.get(entry.pitcherId);
+    if (!ing) return entry;
+
+    changed = true;
+    lineupConfirmedPitchers.add(entry.pitcherId);
+    const result = gradeMatchup({
+      form: ing.form,
+      pitchHand: ing.pitchHand,
+      oppSplit: ing.oppSplit,
+      leagueAvg: gradingLeagueAvg,
+      oppKRateOverall: ing.oppKRateOverall,
+      oppIPAllowed: ing.oppIPAllowed,
+      lineupConfirmed: true,
+    });
+    return { pitcherId: entry.pitcherId, pitcherName: entry.pitcherName, gamePk: entry.gamePk, ...result };
+  });
+
+  if (changed) {
+    store.matchupGrades = { updatedAt: Date.now(), data: { ...store.matchupGrades.data, grades: newGrades } };
+    console.log("[Grading] re-graded starter(s) with newly confirmed lineups");
+  }
+}
+
+/** Compact grading fields for the AI parlay summary — reuses cached form, no new fetches. */
+function compactGradeSummary(pitcherId, gradeEntry) {
+  if (!gradeEntry || gradeEntry.grade === null) return null;
+  const ing = gradingIngredients.get(pitcherId);
+  const form = ing?.form;
+  const hand = ing?.pitchHand === "L" ? "LHP" : "RHP";
+  const pct = gradeEntry.oppMultiplier != null ? Math.round((gradeEntry.oppMultiplier - 1) * 100) : null;
+  return {
+    grade: gradeEntry.grade,
+    projectedK: gradeEntry.projectedK,
+    last5: form ? `${form.last5K} K/start, ${form.last5Pitches} P/start` : null,
+    trend: form ? `${form.kTrend >= 0 ? "+" : ""}${form.kTrend} vs season` : null,
+    oppVsHand: pct !== null ? `${pct >= 0 ? "+" : ""}${pct}% K vs ${hand}` : null,
+    rest: form ? `${form.daysRest} days` : null,
+    lineupConfirmed: lineupConfirmedPitchers.has(pitcherId),
+  };
+}
+
 // ---------- live K watch ----------
 async function computeLiveBoard(date, dash, propBoard) {
   if (!dash) dash = await computeDashboard(date);
@@ -713,10 +858,11 @@ const ANTHROPIC_MODEL = "claude-sonnet-5";
  * Assemble a compact summary from data already sitting in the store — no MLB API
  * calls of its own, so this can be built and tested with no ANTHROPIC_API_KEY at all.
  */
-function buildParlaySummary(dash, bvp, workload, oddsLines) {
+function buildParlaySummary(dash, bvp, workload, oddsLines, grades) {
   const topTeamIds = new Set((dash?.topTeams || []).map((t) => t.teamId));
   const bottomTeamIds = new Set((dash?.bottomTeams || []).map((t) => t.teamId));
   const pitcherById = new Map((dash?.pitchers || []).map((p) => [p.personId, p]));
+  const gradeById = new Map((grades?.grades || []).map((g) => [g.pitcherId, g]));
 
   const matchups = [];
   for (const g of dash?.games || []) {
@@ -728,6 +874,7 @@ function buildParlaySummary(dash, bvp, workload, oddsLines) {
       if (!leg.p) continue;
       const stats = pitcherById.get(leg.p.id);
       const odds = oddsLines ? oddsLines[normalizeName(leg.p.name)] : null;
+      const grading = compactGradeSummary(leg.p.id, gradeById.get(leg.p.id));
       matchups.push({
         pitcher: leg.p.name,
         opponent: leg.opp,
@@ -737,6 +884,13 @@ function buildParlaySummary(dash, bvp, workload, oddsLines) {
         propLine: odds ? odds.line : null,
         overOdds: odds ? odds.overOdds : null,
         underOdds: odds ? odds.underOdds : null,
+        grade: grading?.grade ?? null,
+        projectedK: grading?.projectedK ?? null,
+        last5: grading?.last5 ?? null,
+        trend: grading?.trend ?? null,
+        oppVsHand: grading?.oppVsHand ?? null,
+        rest: grading?.rest ?? null,
+        lineupConfirmed: grading?.lineupConfirmed ?? false,
       });
     }
   }
@@ -787,8 +941,13 @@ async function getParlayPicks(summary) {
             "stats (e.g. a line of 6.5 against a team that makes contact " +
             "easily may be set too high; a line of 4.5 against a top-10 K " +
             "lineup may be set too low). Where no line is available, note " +
-            "that explicitly and reason from stats alone as before. Do not " +
-            "select multiple legs on the same pitcher/game. " +
+            "that explicitly and reason from stats alone as before. Each " +
+            "pitcher may also include a computed matchup grade (1-10) and " +
+            "projected strikeout total — use these as the primary signal, " +
+            "but weigh them against the prop line: a grade of 9 against a " +
+            "line that already prices that in is not an edge. Prefer spots " +
+            "where the projection and the line disagree. Do not select " +
+            "multiple legs on the same pitcher/game. " +
             "Identify the 2-6 strongest individual prop legs for a parlay, " +
             "based only on the data given. For each: name the player/prop, " +
             "give a one-sentence statistical reason citing specific numbers " +
@@ -833,6 +992,7 @@ const store = {
   liveK: { updatedAt: null, data: null },
   bvp: { updatedAt: null, data: null },
   workload: { updatedAt: null, data: null, byTeam: {} },
+  matchupGrades: { updatedAt: null, data: null },
   oddsLines: { updatedAt: null, data: null, unavailable: !ODDS_API_KEY },
   parlayPicks: { updatedAt: null, data: null, unavailable: !ANTHROPIC_API_KEY },
 };
@@ -868,6 +1028,16 @@ async function refreshDashboardAndProps() {
 /** Only touches the live board (with real in-game feeds) when a game is actually in progress. */
 async function refreshLiveIfInProgress() {
   const date = todayISO();
+
+  // Folded into this existing 3-minute tick rather than a separate afternoon job —
+  // lineups confirm ~2-3 hours before first pitch, well before any game goes live,
+  // so this runs independently of the anyLive check below.
+  try {
+    await refreshLineupConfirmations(date);
+  } catch (e) {
+    console.error("[Grading] lineup confirmation tick failed:", e.message);
+  }
+
   let sched;
   try {
     sched = await getJSON(`${MLB}/schedule?sportId=1&date=${date}`);
@@ -912,6 +1082,17 @@ async function refreshDaily() {
     // good data keeps serving instead of being wiped or left half-written.
   }
 
+  console.log("[Grading] refresh started");
+  try {
+    const grades = await computeMatchupGrades(date, dash);
+    store.matchupGrades = { updatedAt: Date.now(), data: grades };
+    console.log("[Grading] refresh succeeded");
+  } catch (err) {
+    console.error("[Grading] refresh FAILED:", err.message);
+    // Same pattern as Innings/Pitches: leave store.matchupGrades untouched on
+    // failure rather than wiping out a good grade set from earlier today.
+  }
+
   console.log("[Odds] refresh started");
   try {
     const odds = await computeStrikeoutOdds();
@@ -936,7 +1117,7 @@ async function refreshDaily() {
   // AI parlay picks — after bvp/workload/odds so the summary reflects today's real numbers.
   // getParlayPicks itself no-ops gracefully when ANTHROPIC_API_KEY isn't set.
   try {
-    const summary = buildParlaySummary(dash, store.bvp.data, store.workload.data, store.oddsLines.data);
+    const summary = buildParlaySummary(dash, store.bvp.data, store.workload.data, store.oddsLines.data, store.matchupGrades.data);
     const result = await getParlayPicks(summary);
     if (result && result.unavailable) {
       store.parlayPicks = { updatedAt: Date.now(), data: null, unavailable: true };
@@ -1041,6 +1222,12 @@ app.get("/api/parlay-picks", (req, res) => {
 // pure read, no date param. { data: null, unavailable: true } until ODDS_API_KEY is set.
 app.get("/api/odds", (req, res) => {
   res.json(store.oddsLines);
+});
+
+// Matchup grades: today-only, computed once a day in the background, then
+// re-graded as lineups confirm in the afternoon — pure read, no date param.
+app.get("/api/matchup-grades", (req, res) => {
+  res.json(store.matchupGrades);
 });
 
 app.get("/api/picks-history", (req, res) => {
