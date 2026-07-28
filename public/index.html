@@ -201,6 +201,25 @@
   .parlay-odds { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--amber); }
 
   .odds-badge { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--amber); }
+
+  .track-headline { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 6px; }
+  .track-record { font-family: 'Teko', sans-serif; font-weight: 600; font-size: 44px; color: var(--ink); }
+  .track-rate { font-family: 'IBM Plex Mono', monospace; font-size: 14px; color: var(--amber); }
+  .track-sample-note { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--secondary); background: rgba(var(--secondary-rgb),0.07); border: 1px solid rgba(var(--secondary-rgb),0.25); border-radius: 8px; padding: 10px 12px; margin: 10px 0 20px; }
+  .track-tiers { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 20px; }
+  .track-tier { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .track-tier .tt-label { font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+  .track-tier .tt-rec { font-family: 'Teko', sans-serif; font-weight: 600; font-size: 26px; color: var(--ink); margin-top: 2px; }
+  .track-tier .tt-rate { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--secondary); }
+  table.track td.result { font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; text-align: center; }
+  table.track td.result span { padding: 3px 8px; border-radius: 10px; border: 1px solid var(--faint); }
+  table.track td.result .win { color: var(--amber); border-color: rgba(var(--amber-rgb),0.5); }
+  table.track td.result .loss { color: #E07B6F; border-color: rgba(192,57,43,0.45); }
+  table.track td.result .push { color: var(--secondary); border-color: rgba(var(--secondary-rgb),0.4); }
+  table.track td.result .no-line { color: var(--muted); }
+  table.track td.result .pending { color: var(--faint); }
+  table.track td.pname { white-space: nowrap; }
+  table.track td.matchup { white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -237,6 +256,7 @@
     <button class="tab-btn" data-tab="bvp">BvP Edges</button>
     <button class="tab-btn" data-tab="props">Prop Board</button>
     <button class="tab-btn" data-tab="parlay">AI Parlay Picks</button>
+    <button class="tab-btn" data-tab="track">Track Record</button>
   </nav>
 
   <main class="content">
@@ -288,6 +308,11 @@
   <section class="tab-panel" data-panel="parlay">
     <h2>AI Parlay Picks <span class="updated" id="parlayUpdated"></span> <span style="letter-spacing:0;text-transform:none">(Claude's read on today's strongest strikeout-prop legs)</span></h2>
     <div id="parlay" class="loading">Loading…</div>
+  </section>
+
+  <section class="tab-panel" data-panel="track">
+    <h2>Track Record <span class="updated" id="trackUpdated"></span> <span style="letter-spacing:0;text-transform:none">(how the AI parlay picks have actually done)</span></h2>
+    <div id="track" class="loading">Loading…</div>
   </section>
 
   <div class="note">Data from MLB Stats API · each board refreshes on its own schedule server-side (see "updated" tags above)</div>
@@ -403,6 +428,7 @@ async function load(date) {
   $("props").className = "loading"; $("props").textContent = "Loading prop board…";
   $("workload").className = "loading"; $("workload").textContent = "Loading (checks every opposing starter's boxscore this season — first load can take a minute)…";
   $("parlay").className = "loading"; $("parlay").textContent = "Loading…";
+  $("track").className = "loading"; $("track").textContent = "Loading…";
 
   // Odds load before matchups/pitchers render, so their pitcher rows can show a
   // line badge on first paint instead of needing a second re-render once odds land.
@@ -426,6 +452,7 @@ async function load(date) {
     "Server is computing Innings/Pitches in the background — retrying…");
 
   loadParlayPicks();
+  loadTrackRecord();
 }
 
 function loadLive(date) {
@@ -497,6 +524,72 @@ function renderParlayPicks(data) {
         ${leg.odds && leg.odds.line != null ? `<div class="parlay-odds">O ${leg.odds.line}${leg.odds.overOdds != null ? ` (${fmtOdds(leg.odds.overOdds)})` : ""}${leg.odds.book ? ` · ${leg.odds.book}` : ""}</div>` : ""}
       </div>`).join("")}</div>
     <div class="note">A statistical read of today's numbers, not a guarantee — bet responsibly.</div>`;
+}
+
+// Track Record: pure read of /api/picks-history, no date param. Unlike the other
+// boards this isn't a background-refreshed store envelope ({updatedAt, data}) —
+// getPicksStats() computes straight from the log file on every request, so there's
+// no "not ready yet" state to poll for.
+function loadTrackRecord() {
+  const el = $("track");
+  fetch("/api/picks-history")
+    .then((res) => { if (!res.ok) throw new Error("HTTP " + res.status); return res.json(); })
+    .then((json) => {
+      renderTrackRecord(json);
+      setUpdated("trackUpdated", Date.now());
+    })
+    .catch((e) => {
+      el.innerHTML = '<div class="err">Failed to load (' + e.message + "). Refresh to retry.</div>";
+    });
+}
+
+function resultBadge(result) {
+  const map = { win: "WIN", loss: "LOSS", push: "PUSH", "no-line": "NO LINE" };
+  const cls = result || "pending";
+  const label = map[result] || "PENDING";
+  return `<span class="${cls}">${label}</span>`;
+}
+
+function renderTrackRecord(data) {
+  const el = $("track");
+  el.className = "";
+  const o = data.overall;
+
+  const headline = o.decided > 0
+    ? `<div class="track-record score">${o.wins}-${o.losses}</div><div class="track-rate">${(o.winRate * 100).toFixed(1)}%</div>`
+    : `<div class="track-record score" style="font-size:22px;color:var(--muted)">No graded picks yet</div>`;
+
+  const sampleNote = data.sampleNote ? `<div class="track-sample-note">${data.sampleNote}</div>` : "";
+
+  const tiers = Object.entries(data.byConfidence || {}).map(([tier, t]) => `
+    <div class="track-tier">
+      <div class="tt-label">${tier}</div>
+      <div class="tt-rec">${t.wins}-${t.losses}</div>
+      <div class="tt-rate">${t.winRate !== null ? (t.winRate * 100).toFixed(1) + "%" : "—"} · ${t.total} picks</div>
+    </div>`).join("");
+
+  const rows = (data.recent || []).map((p) => `
+    <tr>
+      <td class="pname">${p.date}<div class="team-sub">${p.player || ""}</div></td>
+      <td class="matchup">${p.prop || ""}<div class="team-sub">${p.confidence || ""}</div></td>
+      <td class="val"><span>${p.line ?? "—"}</span></td>
+      <td class="val"><span>${p.actual ?? "—"}</span></td>
+      <td class="result">${resultBadge(p.result)}</td>
+    </tr>`).join("");
+
+  const table = (data.recent || []).length
+    ? `<div class="prop-wrap"><table class="track">
+        <tr><th style="text-align:left">Date / Player</th><th style="text-align:left">Prop</th><th>Line</th><th>Actual</th><th>Result</th></tr>
+        ${rows}
+      </table></div>`
+    : `<div class="loading">No picks logged yet.</div>`;
+
+  el.innerHTML = `
+    <div class="track-headline">${headline}</div>
+    ${sampleNote}
+    ${tiers ? `<div class="track-tiers">${tiers}</div>` : ""}
+    ${table}
+    <div class="note">${o.pending} pending · ${o.pushes} push${o.pushes === 1 ? "" : "es"} · ${o.noLine} without a line — excluded from the win rate above · ${o.totalLogged} picks logged total</div>`;
 }
 
 function renderDash(dash) {

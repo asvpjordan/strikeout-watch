@@ -30,6 +30,7 @@
 
 const express = require("express");
 const path = require("path");
+const { logPicks, gradePicks, getPicksStats } = require("./picks-tracking");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -950,11 +951,18 @@ async function refreshDaily() {
         };
       });
       store.parlayPicks = { updatedAt: Date.now(), data: { legs }, unavailable: false };
+      logPicks({ legs }, dash?.games, date);
     } else {
       store.parlayPicks = { updatedAt: Date.now(), data: result, unavailable: false };
     }
   } catch (e) {
     console.error("[refresh] parlay picks failed:", e.message);
+  }
+
+  try {
+    await gradePicks(date);
+  } catch (e) {
+    console.error("[refresh] grading picks failed:", e.message);
   }
 }
 
@@ -1033,6 +1041,14 @@ app.get("/api/parlay-picks", (req, res) => {
 // pure read, no date param. { data: null, unavailable: true } until ODDS_API_KEY is set.
 app.get("/api/odds", (req, res) => {
   res.json(store.oddsLines);
+});
+
+app.get("/api/picks-history", (req, res) => {
+  try {
+    res.json(getPicksStats());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.use(express.static(path.join(__dirname, "public")));
